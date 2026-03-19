@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ChevronRight,
+  Copy,
   ExternalLink,
   Link as LinkIcon,
   LoaderCircle,
+  X,
   Plus,
   Server,
   Shield,
@@ -13,43 +15,16 @@ import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
-import { createMailbox, loadMailboxes, loadMailboxThreads, loadProfile } from '../lib/neon-api'
-import type { InboxThreadRecord, MailboxRecord } from '../lib/types'
+import {
+  createMailbox,
+  createPermalink,
+  loadMailboxes,
+  loadMailboxPermalinks,
+  loadMailboxThreads,
+  loadProfile,
+} from '../lib/neon-api'
+import type { InboxThreadRecord, MailboxRecord, PermalinkRecord } from '../lib/types'
 import { useAuth } from '../lib/use-auth'
-
-interface PermalinkItem {
-  id: string
-  mailboxId: string
-  subject: string
-  from: string
-  date: string
-  status: 'active' | 'expired'
-  hasPin: boolean
-  url: string
-}
-
-const permalinkItems: PermalinkItem[] = [
-  {
-    id: 'pl_01',
-    mailboxId: 'demo-a',
-    subject: 'Angebot fuer Servermigration',
-    from: 'vertrieb@example.com',
-    date: '2026-03-18T08:30:00.000Z',
-    status: 'active',
-    hasPin: true,
-    url: 'https://permalinks.example/thread/abc123',
-  },
-  {
-    id: 'pl_02',
-    mailboxId: 'demo-a',
-    subject: 'Rueckfrage zum Projektstart',
-    from: 'kunde@example.com',
-    date: '2026-03-11T14:15:00.000Z',
-    status: 'expired',
-    hasPin: false,
-    url: 'https://permalinks.example/thread/expired456',
-  },
-]
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString('de-DE', {
@@ -58,19 +33,33 @@ function formatDate(value: string) {
   })
 }
 
+function getPermalinkUrl(token: string) {
+  if (typeof window === 'undefined') {
+    return `/p/${token}`
+  }
+
+  return `${window.location.origin}/p/${token}`
+}
+
 export function DashboardPage() {
   const { ensureProfile, session } = useAuth()
   const [mailboxes, setMailboxes] = useState<MailboxRecord[]>([])
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null)
   const [threads, setThreads] = useState<InboxThreadRecord[]>([])
+  const [permalinks, setPermalinks] = useState<PermalinkRecord[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingThreads, setIsLoadingThreads] = useState(false)
+  const [isLoadingPermalinks, setIsLoadingPermalinks] = useState(false)
   const [isSavingMailbox, setIsSavingMailbox] = useState(false)
+  const [isSavingPermalink, setIsSavingPermalink] = useState(false)
   const [mailboxError, setMailboxError] = useState<string | null>(null)
+  const [permalinkError, setPermalinkError] = useState<string | null>(null)
   const [generalError, setGeneralError] = useState<string | null>(null)
   const [isMailboxOverlayOpen, setIsMailboxOverlayOpen] = useState(false)
   const [isPermalinkOverlayOpen, setIsPermalinkOverlayOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<'inbox' | 'permalinks'>('inbox')
+  const [selectedThread, setSelectedThread] = useState<InboxThreadRecord | null>(null)
+  const [successToast, setSuccessToast] = useState<string | null>(null)
 
   const sessionToken = session?.session?.token ?? null
 
@@ -109,9 +98,6 @@ export function DashboardPage() {
     [mailboxes, selectedMailboxId],
   )
 
-  const effectiveMailboxId = selectedMailbox?.id ?? 'demo-a'
-  const visiblePermalinks = permalinkItems.filter((item) => item.mailboxId === effectiveMailboxId)
-
   useEffect(() => {
     const run = async () => {
       if (!selectedMailboxId || !sessionToken) {
@@ -128,6 +114,46 @@ export function DashboardPage() {
         setGeneralError(error instanceof Error ? error.message : 'INBOX konnte nicht geladen werden.')
       } finally {
         setIsLoadingThreads(false)
+      }
+    }
+
+    void run()
+  }, [selectedMailboxId, sessionToken])
+
+  const copyPermalinkToClipboard = async (token: string) => {
+    await navigator.clipboard.writeText(getPermalinkUrl(token))
+  }
+
+  useEffect(() => {
+    if (!successToast) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setSuccessToast(null)
+    }, 2200)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [successToast])
+
+  useEffect(() => {
+    const run = async () => {
+      if (!selectedMailboxId || !sessionToken) {
+        setPermalinks([])
+        return
+      }
+
+      setIsLoadingPermalinks(true)
+
+      try {
+        const loadedPermalinks = await loadMailboxPermalinks(selectedMailboxId, sessionToken)
+        setPermalinks(loadedPermalinks)
+      } catch (error) {
+        setGeneralError(
+          error instanceof Error ? error.message : 'Permalinks konnten nicht geladen werden.',
+        )
+      } finally {
+        setIsLoadingPermalinks(false)
       }
     }
 
@@ -245,7 +271,14 @@ export function DashboardPage() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {selectedMailbox && visiblePermalinks.length === 0 ? (
+                  {selectedMailbox && isLoadingPermalinks ? (
+                    <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
+                      <LoaderCircle className="size-4 animate-spin" />
+                      Permalinks werden geladen...
+                    </div>
+                  ) : null}
+
+                  {selectedMailbox && !isLoadingPermalinks && permalinks.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-slate-300 px-4 py-5 text-sm text-slate-600">
                       Noch keine Permalinks fuer diesen Server.
                     </div>
@@ -257,7 +290,7 @@ export function DashboardPage() {
                     </div>
                   ) : null}
 
-                  {visiblePermalinks.map((item) => (
+                  {permalinks.map((item) => (
                     <div
                       key={item.id}
                       className="flex flex-col gap-4 rounded-[24px] border border-slate-200 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
@@ -265,10 +298,10 @@ export function DashboardPage() {
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="font-medium text-slate-950">{item.subject}</p>
-                          <Badge variant={item.status === 'active' ? 'success' : 'default'}>
-                            {item.status === 'active' ? 'active' : 'expired'}
+                          <Badge variant={!item.expires_at || new Date(item.expires_at) > new Date() ? 'success' : 'danger'}>
+                            {!item.expires_at || new Date(item.expires_at) > new Date() ? 'active' : 'expired'}
                           </Badge>
-                          {item.hasPin ? (
+                          {item.has_pin ? (
                             <Badge variant="warn">
                               <Shield className="mr-1 size-3" />
                               PIN
@@ -276,18 +309,32 @@ export function DashboardPage() {
                           ) : null}
                         </div>
                         <p className="mt-1 text-sm text-slate-600">
-                          {item.from} · {formatDate(item.date)}
+                          {item.from_label} · {formatDate(item.email_date)}
                         </p>
                       </div>
-                      <a
-                        className="inline-flex items-center gap-2 text-sm font-medium text-slate-950 underline underline-offset-4"
-                        href={item.url}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        Permalink oeffnen
-                        <ExternalLink className="size-4" />
-                      </a>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          aria-label="Permalink kopieren"
+                          className="size-9 p-0"
+                          onClick={() => {
+                            void copyPermalinkToClipboard(item.token)
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          <Copy className="size-4" />
+                        </Button>
+                        <a
+                          aria-label="Permalink oeffnen"
+                          className="inline-flex size-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-950 transition hover:border-slate-300 hover:bg-slate-50"
+                          href={getPermalinkUrl(item.token)}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          <ExternalLink className="size-4" />
+                        </a>
+                      </div>
                     </div>
                   ))}
                 </CardContent>
@@ -332,7 +379,14 @@ export function DashboardPage() {
                         </p>
                         <p className="mt-2 text-sm text-slate-500">{thread.snippet}</p>
                       </div>
-                      <Button onClick={() => setIsPermalinkOverlayOpen(true)} variant="outline">
+                      <Button
+                        onClick={() => {
+                          setSelectedThread(thread)
+                          setPermalinkError(null)
+                          setIsPermalinkOverlayOpen(true)
+                        }}
+                        variant="outline"
+                      >
                         <LinkIcon className="size-4" />
                         Permalink anlegen
                       </Button>
@@ -353,8 +407,14 @@ export function DashboardPage() {
                 <CardTitle>Neuen IMAP-Server eintragen</CardTitle>
                 <CardDescription>Nur die wirklich noetigen Angaben, der Rest bleibt schlank.</CardDescription>
               </div>
-              <Button onClick={() => setIsMailboxOverlayOpen(false)} size="sm" variant="ghost">
-                Schliessen
+              <Button
+                aria-label="Overlay schliessen"
+                className="size-9 p-0"
+                onClick={() => setIsMailboxOverlayOpen(false)}
+                size="sm"
+                variant="ghost"
+              >
+                <X className="size-4" />
               </Button>
             </CardHeader>
             <CardContent>
@@ -459,24 +519,111 @@ export function DashboardPage() {
             <CardHeader className="flex flex-row items-start justify-between gap-4">
               <div>
                 <CardTitle>Neuen Permalink anlegen</CardTitle>
-                <CardDescription>Dieses Overlay ist der vorgesehene Platz fuer PIN und Ablaufdatum.</CardDescription>
+                <CardDescription>
+                  {selectedThread ? selectedThread.subject : 'PIN und Ablaufdatum sind optional.'}
+                </CardDescription>
               </div>
-              <Button onClick={() => setIsPermalinkOverlayOpen(false)} size="sm" variant="ghost">
-                Schliessen
+              <Button
+                aria-label="Overlay schliessen"
+                className="size-9 p-0"
+                onClick={() => setIsPermalinkOverlayOpen(false)}
+                size="sm"
+                variant="ghost"
+              >
+                <X className="size-4" />
               </Button>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
-                Naechster Schritt: Hier bauen wir den echten Flow zum Erzeugen eines Permalinks
-                fuer einen ausgewaehlten Thread ein, inklusive optionaler PIN und Verfallsdatum.
-              </div>
-              <div className="flex justify-end">
-                <Button onClick={() => setIsPermalinkOverlayOpen(false)} variant="outline">
-                  Schliessen
-                </Button>
-              </div>
+            <CardContent>
+              <form
+                className="space-y-4"
+                onSubmit={async (event) => {
+                  event.preventDefault()
+
+                  if (!sessionToken || !selectedMailboxId || !selectedThread) {
+                    setPermalinkError('Thread oder Session fehlt.')
+                    return
+                  }
+
+                  const formData = new FormData(event.currentTarget)
+                  const pin = String(formData.get('pin') ?? '').trim()
+                  const expiresAt = String(formData.get('expiresAt') ?? '').trim()
+
+                  setIsSavingPermalink(true)
+                  setPermalinkError(null)
+
+                  try {
+                    const createdPermalink = await createPermalink(
+                      selectedMailboxId,
+                      {
+                        threadId: selectedThread.id,
+                        subject: selectedThread.subject,
+                        from: selectedThread.from,
+                        date: selectedThread.date,
+                        snippet: selectedThread.snippet,
+                        pin: pin || undefined,
+                        expiresAt: expiresAt || null,
+                      },
+                      sessionToken,
+                    )
+
+                    setPermalinks((current) => [createdPermalink, ...current])
+                    await copyPermalinkToClipboard(createdPermalink.token)
+                    setSuccessToast('Permalink kopiert')
+                    setIsPermalinkOverlayOpen(false)
+                    setSelectedThread(null)
+                    event.currentTarget.reset()
+                  } catch (error) {
+                    setPermalinkError(
+                      error instanceof Error ? error.message : 'Permalink konnte nicht erstellt werden.',
+                    )
+                  } finally {
+                    setIsSavingPermalink(false)
+                  }
+                }}
+              >
+                {selectedThread ? (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
+                    <p className="font-medium text-slate-950">{selectedThread.subject}</p>
+                    <p className="mt-1">
+                      {selectedThread.from} · {formatDate(selectedThread.date)}
+                    </p>
+                  </div>
+                ) : null}
+
+                <div className="space-y-2">
+                  <Label htmlFor="permalink-pin">PIN (optional)</Label>
+                  <Input id="permalink-pin" maxLength={4} name="pin" placeholder="4 Ziffern" />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="permalink-expires-at">Ablaufdatum (optional)</Label>
+                  <Input id="permalink-expires-at" name="expiresAt" type="datetime-local" />
+                </div>
+
+                {permalinkError ? (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                    {permalinkError}
+                  </div>
+                ) : null}
+
+                <div className="flex justify-end gap-3">
+                  <Button onClick={() => setIsPermalinkOverlayOpen(false)} type="button" variant="ghost">
+                    Abbrechen
+                  </Button>
+                  <Button disabled={isSavingPermalink} type="submit">
+                    {isSavingPermalink ? <LoaderCircle className="size-4 animate-spin" /> : <LinkIcon className="size-4" />}
+                    Permalink erstellen
+                  </Button>
+                </div>
+              </form>
             </CardContent>
           </Card>
+        </div>
+      ) : null}
+
+      {successToast ? (
+        <div className="pointer-events-none fixed bottom-6 right-6 z-[60] rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 shadow-sm">
+          {successToast}
         </div>
       ) : null}
     </>

@@ -1,7 +1,12 @@
-import type { InboxThreadRecord, MailboxRecord, ProfileRecord } from './types'
+import type {
+  InboxThreadRecord,
+  MailboxRecord,
+  PermalinkRecord,
+  ProfileRecord,
+  PublicPermalinkRecord,
+} from './types'
 
-const apiBaseUrl =
-  import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8787' : '')
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || ''
 
 function getAuthHeaders(token: string | null | undefined) {
   if (!token) {
@@ -79,4 +84,52 @@ export function createMailbox(input: {
 
 export function loadMailboxThreads(mailboxId: string, token: string) {
   return apiFetch<InboxThreadRecord[]>(`/api/mailboxes/${mailboxId}/threads`, token)
+}
+
+export function loadMailboxPermalinks(mailboxId: string, token: string) {
+  return apiFetch<PermalinkRecord[]>(`/api/mailboxes/${mailboxId}/permalinks`, token)
+}
+
+export function createPermalink(
+  mailboxId: string,
+  input: {
+    threadId: string
+    subject: string
+    from: string
+    date: string
+    snippet: string
+    pin?: string
+    expiresAt?: string | null
+  },
+  token: string,
+) {
+  return apiFetch<PermalinkRecord>(`/api/mailboxes/${mailboxId}/permalinks`, token, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function loadPublicPermalink(token: string, authToken?: string | null, pin?: string) {
+  const query = pin ? `?pin=${encodeURIComponent(pin)}` : ''
+  const response = await fetch(`${apiBaseUrl}/api/permalinks/${token}${query}`, {
+    headers: authToken ? { authorization: `Bearer ${authToken}` } : undefined,
+  })
+  const rawText = await response.text()
+  const payload = (
+    rawText
+      ? (() => {
+          try {
+            return JSON.parse(rawText)
+          } catch {
+            return {}
+          }
+        })()
+      : {}
+  ) as { data?: PublicPermalinkRecord; error?: string }
+
+  if (!response.ok) {
+    throw new Error(payload.error || rawText || 'Permalink konnte nicht geladen werden.')
+  }
+
+  return payload.data as PublicPermalinkRecord
 }

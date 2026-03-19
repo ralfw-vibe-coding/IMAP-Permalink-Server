@@ -34,6 +34,39 @@ export interface InboxThreadRecord {
   snippet: string
 }
 
+export interface PermalinkRecord {
+  id: string
+  mailbox_id: string
+  thread_id: string
+  token: string
+  subject: string
+  from_label: string
+  email_date: string
+  snippet: string
+  has_pin: boolean
+  expires_at: string | null
+  created_at: string
+}
+
+export interface PublicPermalinkRecord {
+  locked: boolean
+  subject: string
+  from_label: string
+  email_date: string
+  expires_at: string | null
+  has_pin?: boolean
+  snippet?: string
+  thread?: {
+    id: string
+    subject: string
+    from: string
+    to: string
+    date: string
+    snippet: string
+    body: string
+  }
+}
+
 export interface AuthFormValues {
   email: string
   password: string

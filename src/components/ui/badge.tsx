@@ -10,6 +10,7 @@ const badgeVariants = cva(
         default: 'border-slate-200 bg-slate-100 text-slate-700',
         success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
         warn: 'border-orange-200 bg-orange-50 text-orange-700',
+        danger: 'border-rose-200 bg-rose-50 text-rose-700',
       },
     },
     defaultVariants: {

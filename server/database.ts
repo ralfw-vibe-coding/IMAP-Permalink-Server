@@ -59,11 +59,59 @@ export interface Database {
           updated_at?: string
         }
       }
+      permalinks: {
+        Row: {
+          id: string
+          user_id: string
+          mailbox_id: string
+          thread_id: string
+          token: string
+          subject: string
+          from_label: string
+          email_date: string
+          snippet: string
+          has_pin: boolean
+          pin_hash: string | null
+          expires_at: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id?: string
+          mailbox_id: string
+          thread_id: string
+          token: string
+          subject: string
+          from_label: string
+          email_date: string
+          snippet: string
+          has_pin: boolean
+          pin_hash?: string | null
+          expires_at?: string | null
+          created_at?: string
+        }
+        Update: {
+          expires_at?: string | null
+          has_pin?: boolean
+          pin_hash?: string | null
+        }
+      }
     }
   }
 }
 
 export function createDatabaseClient(token: string) {
+  return new NeonPostgrestClient<Database>({
+    dataApiUrl: serverEnv.neonDataApiUrl,
+    options: {
+      global: {
+        fetch: fetchWithToken(async () => token),
+      },
+    },
+  })
+}
+
+export function createPublicDatabaseClient(token: string) {
   return new NeonPostgrestClient<Database>({
     dataApiUrl: serverEnv.neonDataApiUrl,
     options: {
