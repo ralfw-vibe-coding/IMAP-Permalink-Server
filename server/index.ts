@@ -1,7 +1,11 @@
 import 'dotenv/config'
 import { createHash, randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { extname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import cors from '@fastify/cors'
 import Fastify from 'fastify'
+import type { FastifyReply } from 'fastify'
 import { getAuthenticatedUserId, getBearerToken } from './auth.js'
 import { decryptSecret, encryptSecret } from './crypto.js'
 import { createDatabaseClient, createPublicDatabaseClient } from './database.js'
@@ -9,6 +13,29 @@ import { serverEnv } from './env.js'
 import { loadInboxThreads, loadThreadDetail } from './imap.js'
 
 const app = Fastify({ logger: true })
+const serverFilePath = fileURLToPath(import.meta.url)
+const distDir = resolve(serverFilePath, '../../dist')
+const distIndexPath = resolve(distDir, 'index.html')
+
+const assetMimeTypes: Record<string, string> = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
+
+async function sendStaticFile(reply: FastifyReply, filePath: string) {
+  const content = await readFile(filePath)
+  const mimeType = assetMimeTypes[extname(filePath)] || 'application/octet-stream'
+  return reply.type(mimeType).send(content)
+}
 
 await app.register(cors, {
   origin: true,
@@ -397,6 +424,42 @@ app.post('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
     return reply.code(500).send({
       error: error instanceof Error ? error.message : 'Unbekannter Serverfehler bei /permalinks',
     })
+  }
+})
+
+app.get('/assets/*', async (request, reply) => {
+  const assetPath = String(request.url || '').replace(/^\/+/, '')
+  const absolutePath = resolve(distDir, assetPath)
+
+  if (!absolutePath.startsWith(distDir)) {
+    return reply.code(403).send('Forbidden')
+  }
+
+  try {
+    return await sendStaticFile(reply, absolutePath)
+  } catch {
+    return reply.code(404).send('Not found')
+  }
+})
+
+app.get('/favicon.ico', async (_request, reply) => {
+  try {
+    return await sendStaticFile(reply, resolve(distDir, 'favicon.ico'))
+  } catch {
+    return reply.code(404).send('Not found')
+  }
+})
+
+app.setNotFoundHandler(async (request, reply) => {
+  if (request.url.startsWith('/api/')) {
+    return reply.code(404).send({ error: 'Not found' })
+  }
+
+  try {
+    return await sendStaticFile(reply, distIndexPath)
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send('Frontend build not found. Run npm run build first.')
   }
 })
 
