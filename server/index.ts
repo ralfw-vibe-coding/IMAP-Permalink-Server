@@ -8,7 +8,7 @@ import Fastify from 'fastify'
 import type { FastifyReply } from 'fastify'
 import { getAuthenticatedUserId, getBearerToken } from './auth.js'
 import { decryptSecret, encryptSecret } from './crypto.js'
-import { createDatabaseClient, createPublicDatabaseClient } from './database.js'
+import { queryOne, queryRows } from './database.js'
 import { serverEnv } from './env.js'
 import { loadInboxThreads, loadThreadDetail } from './imap.js'
 
@@ -50,19 +50,36 @@ app.get('/api/permalinks/:token', async (request, reply) => {
   try {
     const params = request.params as { token: string }
     const pin = String((request.query as { pin?: string } | undefined)?.pin ?? '').trim()
-    const db = createPublicDatabaseClient()
-    const permalinkResult = await db.rpc('get_permalink_access', {
-      permalink_token: params.token,
-    })
-
-    if (permalinkResult.error) {
-      request.log.error(permalinkResult.error)
-      return reply.code(500).send({ error: permalinkResult.error.message })
-    }
-
-    const permalink = Array.isArray(permalinkResult.data)
-      ? permalinkResult.data[0]
-      : permalinkResult.data
+    const permalink = await queryOne<{
+      mailbox_id: string
+      thread_id: string
+      subject: string
+      from_label: string
+      to_label: string
+      email_date: string
+      snippet: string
+      body: string
+      has_pin: boolean
+      pin_hash: string | null
+      expires_at: string | null
+    }>(
+      `select
+        p.mailbox_id,
+        p.thread_id,
+        p.subject,
+        p.from_label,
+        p.to_label,
+        p.email_date,
+        p.snippet,
+        p.body,
+        p.has_pin,
+        p.pin_hash,
+        p.expires_at
+      from public.permalinks p
+      where p.token = $1
+      limit 1`,
+      [params.token],
+    )
 
     if (!permalink) {
       return reply.code(404).send({ error: 'Permalink wurde nicht gefunden.' })
@@ -91,15 +108,12 @@ app.get('/api/permalinks/:token', async (request, reply) => {
       }
     }
 
-    const thread = await loadThreadDetail({
-      host: permalink.host,
-      port: permalink.port,
-      secure: permalink.secure,
-      username: permalink.username,
-      password: decryptSecret(permalink.encrypted_password, serverEnv.cryptoSecret),
-      folder: permalink.folder,
-      threadId: permalink.thread_id,
-    })
+    if (!permalink.body) {
+      return reply.code(410).send({
+        error:
+          'Dieser Permalink enthaelt noch keinen gespeicherten Snapshot. Bitte den Link neu erzeugen.',
+      })
+    }
 
     return {
       data: {
@@ -110,7 +124,28 @@ app.get('/api/permalinks/:token', async (request, reply) => {
         expires_at: permalink.expires_at,
         has_pin: permalink.has_pin,
         snippet: permalink.snippet,
-        thread,
+        thread: {
+          root: {
+            id: permalink.thread_id,
+            subject: permalink.subject,
+            from: permalink.from_label,
+            to: permalink.to_label || 'Unbekannt',
+            date: permalink.email_date,
+            snippet: permalink.snippet,
+            body: permalink.body,
+          },
+          messages: [
+            {
+              id: permalink.thread_id,
+              subject: permalink.subject,
+              from: permalink.from_label,
+              to: permalink.to_label || 'Unbekannt',
+              date: permalink.email_date,
+              snippet: permalink.snippet,
+              body: permalink.body,
+            },
+          ],
+        },
       },
     }
   } catch (error) {
@@ -130,15 +165,22 @@ app.get('/api/profile', async (request, reply) => {
     return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
 
-  const db = createDatabaseClient(token)
-  const result = await db.from('profiles').select('id, full_name, created_at, updated_at').eq('id', userId).maybeSingle()
+  try {
+    const result = await queryOne<{
+      id: string
+      full_name: string
+      created_at: string
+      updated_at: string
+    }>(
+      'select id, full_name, created_at, updated_at from public.profiles where id = $1 limit 1',
+      [userId],
+    )
 
-  if (result.error) {
-    request.log.error(result.error)
-    return reply.code(500).send({ error: result.error.message })
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Profil konnte nicht geladen werden.' })
   }
-
-  return { data: result.data }
 })
 
 app.put('/api/profile', async (request, reply) => {
@@ -157,43 +199,59 @@ app.put('/api/profile', async (request, reply) => {
     return reply.code(400).send({ error: 'fullName ist erforderlich.' })
   }
 
-  const db = createDatabaseClient(token)
-  const result = await db
-    .from('profiles')
-    .upsert(
-      {
-        id: userId,
-        full_name: fullName,
-      },
-      { onConflict: 'id' },
+  try {
+    const result = await queryOne<{
+      id: string
+      full_name: string
+      created_at: string
+      updated_at: string
+    }>(
+      `insert into public.profiles (id, full_name)
+       values ($1, $2)
+       on conflict (id) do update set
+         full_name = excluded.full_name,
+         updated_at = now()
+       returning id, full_name, created_at, updated_at`,
+      [userId, fullName],
     )
-    .select('id, full_name, created_at, updated_at')
-    .single()
 
-  if (result.error) {
-    request.log.error(result.error)
-    return reply.code(500).send({ error: result.error.message })
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Profil konnte nicht gespeichert werden.' })
   }
-
-  return { data: result.data }
 })
 
 app.get('/api/mailboxes', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
 
-  const db = createDatabaseClient(token)
-  const result = await db
-    .from('mailboxes')
-    .select('id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at')
-    .order('created_at', { ascending: false })
+  try {
+    const result = await queryRows<{
+      id: string
+      user_id: string
+      label: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      folder: string
+      last_verified_at: string | null
+      created_at: string
+      updated_at: string
+    }>(
+      `select id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at
+       from public.mailboxes
+       where user_id = $1
+       order by created_at desc`,
+      [getAuthenticatedUserId(token)],
+    )
 
-  if (result.error) {
-    request.log.error(result.error)
-    return reply.code(500).send({ error: result.error.message })
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Mailboxes konnten nicht geladen werden.' })
   }
-
-  return { data: result.data ?? [] }
 })
 
 app.get('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
@@ -206,22 +264,61 @@ app.get('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
   }
 
   const params = request.params as { mailboxId: string }
-  const db = createDatabaseClient(token)
-  const result = await db
-    .from('permalinks')
-    .select(
-      'id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at',
+  try {
+    const result = await queryRows<{
+      id: string
+      mailbox_id: string
+      thread_id: string
+      token: string
+      subject: string
+      from_label: string
+      email_date: string
+      snippet: string
+      has_pin: boolean
+      expires_at: string | null
+      created_at: string
+    }>(
+      `select id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at
+       from public.permalinks
+       where mailbox_id = $1 and user_id = $2
+       order by created_at desc`,
+      [params.mailboxId, userId],
     )
-    .eq('mailbox_id', params.mailboxId)
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
 
-  if (result.error) {
-    request.log.error(result.error)
-    return reply.code(500).send({ error: result.error.message })
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Permalinks konnten nicht geladen werden.' })
+  }
+})
+
+app.delete('/api/mailboxes/:mailboxId/permalinks/:permalinkId', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  const userId = getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
 
-  return { data: result.data ?? [] }
+  const params = request.params as { mailboxId: string; permalinkId: string }
+  try {
+    const result = await queryOne<{ id: string }>(
+      `delete from public.permalinks
+       where id = $1 and mailbox_id = $2 and user_id = $3
+       returning id`,
+      [params.permalinkId, params.mailboxId, userId],
+    )
+
+    if (!result) {
+      return reply.code(404).send({ error: 'Permalink nicht gefunden.' })
+    }
+
+    return { data: { success: true } }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Permalink konnte nicht geloescht werden.' })
+  }
 })
 
 app.get('/api/mailboxes/:mailboxId/threads', async (request, reply) => {
@@ -235,26 +332,31 @@ app.get('/api/mailboxes/:mailboxId/threads', async (request, reply) => {
     }
 
     const params = request.params as { mailboxId: string }
-    const db = createDatabaseClient(token)
-    const mailboxResult = await db
-      .from('mailboxes')
-      .select(
-        'id, user_id, label, host, port, secure, username, encrypted_password, folder, last_verified_at, created_at, updated_at',
-      )
-      .eq('id', params.mailboxId)
-      .eq('user_id', userId)
-      .single()
+    const mailbox = await queryOne<{
+      id: string
+      user_id: string
+      label: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      encrypted_password: string
+      folder: string
+      last_verified_at: string | null
+      created_at: string
+      updated_at: string
+    }>(
+      `select id, user_id, label, host, port, secure, username, encrypted_password, folder, last_verified_at, created_at, updated_at
+       from public.mailboxes
+       where id = $1 and user_id = $2
+       limit 1`,
+      [params.mailboxId, userId],
+    )
 
-    if (mailboxResult.error) {
-      request.log.error(mailboxResult.error)
-      return reply.code(500).send({ error: mailboxResult.error.message })
-    }
-
-    if (!mailboxResult.data) {
+    if (!mailbox) {
       return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
     }
 
-    const mailbox = mailboxResult.data
     const threads = await loadInboxThreads({
       host: mailbox.host,
       port: mailbox.port,
@@ -307,28 +409,26 @@ app.post('/api/mailboxes', async (request, reply) => {
       return reply.code(400).send({ error: 'Mailbox-Daten sind unvollstaendig.' })
     }
 
-    const db = createDatabaseClient(token)
-    const result = await db
-      .from('mailboxes')
-      .insert({
-        user_id: userId,
-        label,
-        host,
-        port,
-        secure,
-        username,
-        encrypted_password: encryptSecret(password, serverEnv.cryptoSecret),
-        folder,
-      })
-      .select('id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at')
-      .single()
+    const result = await queryOne<{
+      id: string
+      user_id: string
+      label: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      folder: string
+      last_verified_at: string | null
+      created_at: string
+      updated_at: string
+    }>(
+      `insert into public.mailboxes (user_id, label, host, port, secure, username, encrypted_password, folder)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       returning id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at`,
+      [userId, label, host, port, secure, username, encryptSecret(password, serverEnv.cryptoSecret), folder],
+    )
 
-    if (result.error) {
-      request.log.error(result.error)
-      return reply.code(500).send({ error: result.error.message })
-    }
-
-    return reply.code(201).send({ data: result.data })
+    return reply.code(201).send({ data: result })
   } catch (error) {
     request.log.error(error)
     return reply.code(500).send({
@@ -376,49 +476,74 @@ app.post('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
       return reply.code(400).send({ error: 'PIN muss genau 4 Ziffern haben.' })
     }
 
-    const db = createDatabaseClient(token)
-    const mailboxResult = await db
-      .from('mailboxes')
-      .select('id')
-      .eq('id', params.mailboxId)
-      .eq('user_id', userId)
-      .maybeSingle()
+    const mailbox = await queryOne<{
+      id: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      encrypted_password: string
+      folder: string
+    }>(
+      `select id, host, port, secure, username, encrypted_password, folder
+       from public.mailboxes
+       where id = $1 and user_id = $2
+       limit 1`,
+      [params.mailboxId, userId],
+    )
 
-    if (mailboxResult.error) {
-      request.log.error(mailboxResult.error)
-      return reply.code(500).send({ error: mailboxResult.error.message })
-    }
-
-    if (!mailboxResult.data) {
+    if (!mailbox) {
       return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
     }
 
-    const result = await db
-      .from('permalinks')
-      .insert({
-        user_id: userId,
-        mailbox_id: params.mailboxId,
-        thread_id: threadId,
-        token: randomBytes(16).toString('hex'),
-        subject,
-        from_label: from,
-        email_date: new Date(date).toISOString(),
-        snippet,
-        has_pin: Boolean(pin),
-        pin_hash: pin ? createHash('sha256').update(pin).digest('hex') : null,
-        expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
-      })
-      .select(
-        'id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at',
-      )
-      .single()
+    const threadDetail = await loadThreadDetail({
+      host: mailbox.host,
+      port: mailbox.port,
+      secure: mailbox.secure,
+      username: mailbox.username,
+      password: decryptSecret(mailbox.encrypted_password, serverEnv.cryptoSecret),
+      folder: mailbox.folder,
+      threadId,
+    })
 
-    if (result.error) {
-      request.log.error(result.error)
-      return reply.code(500).send({ error: result.error.message })
-    }
+    const snapshotMessage = threadDetail.root
 
-    return reply.code(201).send({ data: result.data })
+    const result = await queryOne<{
+      id: string
+      mailbox_id: string
+      thread_id: string
+      token: string
+      subject: string
+      from_label: string
+      email_date: string
+      snippet: string
+      has_pin: boolean
+      expires_at: string | null
+      created_at: string
+    }>(
+      `insert into public.permalinks (
+         user_id, mailbox_id, thread_id, token, subject, from_label, to_label, email_date, snippet, body, has_pin, pin_hash, expires_at
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       returning id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at`,
+      [
+        userId,
+        params.mailboxId,
+        threadId,
+        randomBytes(16).toString('hex'),
+        snapshotMessage.subject || subject,
+        snapshotMessage.from || from,
+        snapshotMessage.to || '',
+        new Date(snapshotMessage.date || date).toISOString(),
+        snapshotMessage.snippet || snippet,
+        snapshotMessage.body || '',
+        Boolean(pin),
+        pin ? createHash('sha256').update(pin).digest('hex') : null,
+        expiresAt ? new Date(expiresAt).toISOString() : null,
+      ],
+    )
+
+    return reply.code(201).send({ data: result })
   } catch (error) {
     request.log.error(error)
     return reply.code(500).send({

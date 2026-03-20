@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Link as LinkIcon,
   LoaderCircle,
+  Trash2,
   X,
   Plus,
   Server,
@@ -16,6 +17,7 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import {
   createMailbox,
+  deletePermalink,
   createPermalink,
   loadMailboxes,
   loadMailboxPermalinks,
@@ -51,6 +53,8 @@ export function DashboardPage() {
   const [isLoadingPermalinks, setIsLoadingPermalinks] = useState(false)
   const [isSavingMailbox, setIsSavingMailbox] = useState(false)
   const [isSavingPermalink, setIsSavingPermalink] = useState(false)
+  const [deletingPermalinkId, setDeletingPermalinkId] = useState<string | null>(null)
+  const [pendingDeletePermalinkId, setPendingDeletePermalinkId] = useState<string | null>(null)
   const [mailboxError, setMailboxError] = useState<string | null>(null)
   const [permalinkError, setPermalinkError] = useState<string | null>(null)
   const [generalError, setGeneralError] = useState<string | null>(null)
@@ -123,6 +127,29 @@ export function DashboardPage() {
     await navigator.clipboard.writeText(getPermalinkUrl(token))
   }
 
+  const handleDeletePermalink = async (permalinkId: string) => {
+    if (!selectedMailboxId || !sessionToken) {
+      setGeneralError('Session-Token fehlt. Bitte erneut einloggen.')
+      return
+    }
+
+    setDeletingPermalinkId(permalinkId)
+    setGeneralError(null)
+
+    try {
+      await deletePermalink(selectedMailboxId, permalinkId, sessionToken)
+      setPermalinks((current) => current.filter((item) => item.id !== permalinkId))
+      setSuccessToast('Permalink geloescht')
+    } catch (error) {
+      setGeneralError(
+        error instanceof Error ? error.message : 'Permalink konnte nicht geloescht werden.',
+      )
+    } finally {
+      setDeletingPermalinkId(null)
+      setPendingDeletePermalinkId(null)
+    }
+  }
+
   useEffect(() => {
     if (!successToast) {
       return
@@ -134,6 +161,22 @@ export function DashboardPage() {
 
     return () => window.clearTimeout(timeoutId)
   }, [successToast])
+
+  useEffect(() => {
+    if (!pendingDeletePermalinkId) {
+      return
+    }
+
+    const handlePointerDown = () => {
+      setPendingDeletePermalinkId(null)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [pendingDeletePermalinkId])
 
   useEffect(() => {
     const run = async () => {
@@ -338,6 +381,39 @@ export function DashboardPage() {
                         >
                           <ExternalLink className="size-4" />
                         </a>
+                        <Button
+                          aria-label={
+                            pendingDeletePermalinkId === item.id
+                              ? 'Loeschen bestaetigen'
+                              : 'Permalink loeschen'
+                          }
+                          className="size-9 border-rose-200 bg-rose-50 p-0 text-rose-700 hover:border-rose-300 hover:bg-rose-100 hover:text-rose-800"
+                          disabled={deletingPermalinkId === item.id}
+                          onPointerDown={(event) => {
+                            event.stopPropagation()
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation()
+
+                            if (pendingDeletePermalinkId === item.id) {
+                              void handleDeletePermalink(item.id)
+                              return
+                            }
+
+                            setPendingDeletePermalinkId(item.id)
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          {deletingPermalinkId === item.id ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : pendingDeletePermalinkId === item.id ? (
+                            <span className="text-sm font-semibold leading-none">?</span>
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                        </Button>
                       </div>
                     </div>
                   ))}

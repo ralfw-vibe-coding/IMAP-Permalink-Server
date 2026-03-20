@@ -14,7 +14,6 @@ function getAuthHeaders(token: string | null | undefined) {
   }
 
   return {
-    'content-type': 'application/json',
     authorization: `Bearer ${token}`,
   }
 }
@@ -25,6 +24,7 @@ async function apiFetch<T>(path: string, token: string, init?: RequestInit): Pro
     ...init,
     headers: {
       ...headers,
+      ...(init?.body ? { 'content-type': 'application/json' } : {}),
       ...(init?.headers ?? {}),
     },
   })
@@ -106,6 +106,12 @@ export function createPermalink(
   return apiFetch<PermalinkRecord>(`/api/mailboxes/${mailboxId}/permalinks`, token, {
     method: 'POST',
     body: JSON.stringify(input),
+  })
+}
+
+export function deletePermalink(mailboxId: string, permalinkId: string, token: string) {
+  return apiFetch<{ success: true }>(`/api/mailboxes/${mailboxId}/permalinks/${permalinkId}`, token, {
+    method: 'DELETE',
   })
 }
 
