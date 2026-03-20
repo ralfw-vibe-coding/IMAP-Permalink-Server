@@ -8,27 +8,100 @@ Users can:
 - register IMAP mailboxes
 - browse inbox threads
 - create public permalinks for emails
-- optionally protect permalinks with a 4-digit PIN
-- optionally set an expiration date
+- protect permalinks with an optional 4-digit PIN
+- set an optional expiration date
 
-The app reads email content live from IMAP when a permalink is opened. Email bodies are not archived in the database.
+Permalinks store a snapshot of the mail body when they are created. Public permalink views are rendered from that stored snapshot and do not depend on the mail still existing in IMAP.
 
 ## Stack
 
 - Frontend: React + Vite + TypeScript
 - Backend: Node.js + Fastify
-- Auth + persistence: Neon Auth + Neon Postgres / Data API
+- Auth: Neon Auth
+- Database: Neon Postgres
 - Mail access: IMAP via `imapflow`
 
-## Environment variables
+## Local `.env`
 
-Create a `.env` file for local development:
+Use a local `.env` like this:
 
 ```env
 VITE_NEON_AUTH_URL=https://your-branch.neonauth.<region>.aws.neon.tech/neondb/auth
-VITE_NEON_DATA_API_URL=https://your-branch.apirest.<region>.aws.neon.tech/neondb/rest/v1
+DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 APP_CRYPTO_SECRET=replace-with-a-long-random-secret
 ```
+
+Notes:
+
+- `VITE_NEON_AUTH_URL` is used by the frontend for Neon Auth.
+- `DATABASE_URL` is used by the Node.js server for direct Postgres access.
+- `APP_CRYPTO_SECRET` is used to encrypt stored IMAP passwords.
+
+## What To Get From Neon
+
+From Neon you need:
+
+1. `Auth URL`
+This is the Neon Auth project URL and goes into:
+
+```env
+VITE_NEON_AUTH_URL=...
+```
+
+2. `Postgres connection string`
+Use the normal connection string from Neon and put it into:
+
+```env
+DATABASE_URL=...
+```
+
+Use the direct Postgres connection string for the server. The app no longer depends on Neon Data API for server-side reads and writes.
+
+## Database setup
+
+Run this SQL once in Neon:
+
+[src/database/schema.sql](/Users/ralfw/Repositories/08%20Vibe%20Coding/IMAP%20Permalink%20Server/src/database/schema.sql)
+
+The SQL file is current.
+
+It creates and updates:
+
+- `public.profiles`
+- `public.mailboxes`
+- `public.permalinks`
+
+The important columns for permalink snapshots are:
+
+- `from_label`
+- `to_label`
+- `snippet`
+- `body`
+
+## Neon Auth configuration
+
+In Neon Auth, add your app origin as a trusted domain.
+
+Important:
+
+- enter the exact origin
+- do not add a trailing slash
+
+Correct:
+
+```text
+https://your-app.onrender.com
+```
+
+Incorrect:
+
+```text
+https://your-app.onrender.com/
+```
+
+If the trailing slash is present, Neon Auth login can fail with `403 Forbidden`.
+
+For local development, keep localhost enabled as well.
 
 ## Local development
 
@@ -38,13 +111,14 @@ Install dependencies:
 npm install
 ```
 
-Run frontend and backend together:
+Start frontend and backend together:
 
 ```bash
 npm run dev
 ```
 
-The frontend runs on `http://localhost:5173` and proxies API requests to the local Fastify server.
+Frontend runs on `http://localhost:5173`.
+The backend runs locally and the frontend talks to it via relative `/api/...` requests.
 
 ## Production build
 
@@ -60,53 +134,34 @@ Start the production server:
 node dist-server/index.js
 ```
 
-The production server serves both:
+The server delivers:
 
 - the API under `/api/*`
 - the built frontend from `dist/`
 
-## Database setup
+## Render deployment
 
-Run the SQL from:
+Use a `Web Service`.
 
-[src/database/schema.sql](/Users/ralfw/Repositories/08%20Vibe%20Coding/IMAP%20Permalink%20Server/src/database/schema.sql)
+Recommended settings:
 
-After applying schema changes in Neon, refresh the schema cache.
+- Root Directory: leave empty
+- Build Command: `npm install --ignore-scripts && npm run build`
+- Start Command: `node dist-server/index.js`
 
-## Neon Auth configuration
+Environment variables on Render:
 
-In Neon Auth, add your application origins as trusted domains.
-
-Important:
-
-- enter the exact origin
-- do not add a trailing slash
-
-Correct:
-
-```text
-https://imap-permalink-server.ralfw-deno.deno.net
+```env
+VITE_NEON_AUTH_URL=...
+DATABASE_URL=...
+APP_CRYPTO_SECRET=...
 ```
 
-Incorrect:
+Why `--ignore-scripts`:
 
-```text
-https://imap-permalink-server.ralfw-deno.deno.net/
-```
-
-If the trailing slash is present, Neon Auth may reject login requests with `403 Forbidden`.
-
-For local development, keep `localhost` enabled as well.
-
-## Deno Deploy notes
-
-If you deploy this Node.js app to Deno Deploy:
-
-- install command: `npm install --ignore-scripts`
-- build command: `npm run build`
-- entrypoint: `dist-server/index.js`
-
-`--ignore-scripts` is currently needed because a transitive Sentry profiling dependency can fail during install in the deploy environment.
+- a transitive dependency can try to install a native Sentry profiling binary
+- that can fail in hosted build environments
+- the app does not need that binary
 
 ## Runtime checklist
 
@@ -115,6 +170,7 @@ After deployment, test these flows on the live URL:
 - login
 - loading inbox contents
 - creating a permalink
+- deleting a permalink
 - opening a permalink without login
 - opening a PIN-protected permalink
-- opening an expired permalink
+- opening a permalink after deleting or moving the original email

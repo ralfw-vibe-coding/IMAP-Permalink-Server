@@ -13,7 +13,6 @@ function requireEnv(names: string[]) {
 export const serverEnv = {
   port: Number(process.env.PORT ?? 8787),
   neonAuthUrl: requireEnv(['VITE_NEON_AUTH_URL', 'NEON_AUTH_URL']),
-  neonDataApiUrl: requireEnv(['VITE_NEON_DATA_API_URL', 'NEON_DATA_API_URL']),
   databaseUrl: requireEnv(['DATABASE_URL']),
   cryptoSecret: requireEnv(['APP_CRYPTO_SECRET']),
 }
