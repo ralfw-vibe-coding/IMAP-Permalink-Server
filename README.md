@@ -1,73 +1,120 @@
-# React + TypeScript + Vite
+# IMAP Permalink Server
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Node.js application with React, TypeScript, Neon Auth, Neon Postgres and live IMAP access.
 
-Currently, two official plugins are available:
+Users can:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- sign up and log in
+- register IMAP mailboxes
+- browse inbox threads
+- create public permalinks for emails
+- optionally protect permalinks with a 4-digit PIN
+- optionally set an expiration date
 
-## React Compiler
+The app reads email content live from IMAP when a permalink is opened. Email bodies are not archived in the database.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Stack
 
-## Expanding the ESLint configuration
+- Frontend: React + Vite + TypeScript
+- Backend: Node.js + Fastify
+- Auth + persistence: Neon Auth + Neon Postgres / Data API
+- Mail access: IMAP via `imapflow`
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Environment variables
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+Create a `.env` file for local development:
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```env
+VITE_NEON_AUTH_URL=https://your-branch.neonauth.<region>.aws.neon.tech/neondb/auth
+VITE_NEON_DATA_API_URL=https://your-branch.apirest.<region>.aws.neon.tech/neondb/rest/v1
+APP_CRYPTO_SECRET=replace-with-a-long-random-secret
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Local development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Install dependencies:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
+
+Run frontend and backend together:
+
+```bash
+npm run dev
+```
+
+The frontend runs on `http://localhost:5173` and proxies API requests to the local Fastify server.
+
+## Production build
+
+Build frontend and backend:
+
+```bash
+npm run build
+```
+
+Start the production server:
+
+```bash
+node dist-server/index.js
+```
+
+The production server serves both:
+
+- the API under `/api/*`
+- the built frontend from `dist/`
+
+## Database setup
+
+Run the SQL from:
+
+[src/database/schema.sql](/Users/ralfw/Repositories/08%20Vibe%20Coding/IMAP%20Permalink%20Server/src/database/schema.sql)
+
+After applying schema changes in Neon, refresh the schema cache.
+
+## Neon Auth configuration
+
+In Neon Auth, add your application origins as trusted domains.
+
+Important:
+
+- enter the exact origin
+- do not add a trailing slash
+
+Correct:
+
+```text
+https://imap-permalink-server.ralfw-deno.deno.net
+```
+
+Incorrect:
+
+```text
+https://imap-permalink-server.ralfw-deno.deno.net/
+```
+
+If the trailing slash is present, Neon Auth may reject login requests with `403 Forbidden`.
+
+For local development, keep `localhost` enabled as well.
+
+## Deno Deploy notes
+
+If you deploy this Node.js app to Deno Deploy:
+
+- install command: `npm install --ignore-scripts`
+- build command: `npm run build`
+- entrypoint: `dist-server/index.js`
+
+`--ignore-scripts` is currently needed because a transitive Sentry profiling dependency can fail during install in the deploy environment.
+
+## Runtime checklist
+
+After deployment, test these flows on the live URL:
+
+- login
+- loading inbox contents
+- creating a permalink
+- opening a permalink without login
+- opening a PIN-protected permalink
+- opening an expired permalink
