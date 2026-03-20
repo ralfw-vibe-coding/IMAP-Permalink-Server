@@ -8,7 +8,6 @@ import {
   X,
   Plus,
   Server,
-  Shield,
 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -296,14 +295,19 @@ export function DashboardPage() {
                       className="flex flex-col gap-4 rounded-[24px] border border-slate-200 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
                     >
                       <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-medium text-slate-950">{item.subject}</p>
-                          <Badge variant={!item.expires_at || new Date(item.expires_at) > new Date() ? 'success' : 'danger'}>
+                        <p className="text-xs text-slate-400">
+                          from {item.from_label} to {selectedMailbox?.username ?? 'dein Postfach'}
+                        </p>
+                        <p className="font-medium text-slate-950">{item.subject}</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <Badge
+                            className="min-h-8"
+                            variant={!item.expires_at || new Date(item.expires_at) > new Date() ? 'success' : 'danger'}
+                          >
                             {!item.expires_at || new Date(item.expires_at) > new Date() ? 'active' : 'expired'}
                           </Badge>
                           {item.has_pin ? (
-                            <Badge variant="warn">
-                              <Shield className="mr-1 size-3" />
+                            <Badge className="min-h-8" variant="warn">
                               PIN
                             </Badge>
                           ) : null}
@@ -373,6 +377,9 @@ export function DashboardPage() {
                       className="flex flex-col gap-4 rounded-[24px] border border-slate-200 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
                     >
                       <div className="min-w-0">
+                        <p className="text-xs text-slate-400">
+                          from {thread.from} to {selectedMailbox?.username ?? 'dein Postfach'}
+                        </p>
                         <p className="font-medium text-slate-950">{thread.subject}</p>
                         <p className="mt-1 text-sm text-slate-600">
                           {thread.from} · {formatDate(thread.date)}

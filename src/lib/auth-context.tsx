@@ -37,6 +37,22 @@ async function loadSession() {
   return result.data ?? null
 }
 
+async function waitForSession(attempts = 6, delayMs = 250) {
+  let lastSession: SessionPayload | null = null
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    lastSession = await loadSession()
+
+    if (lastSession?.session?.token) {
+      return lastSession
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs))
+  }
+
+  return lastSession
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<SessionPayload | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -82,6 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async ({ email, password }: { email: string; password: string }) => {
     setIsLoading(true)
+    setError(null)
 
     try {
       const result = await getBetterAuthClient().signIn.email({
@@ -94,13 +111,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return false
       }
 
-      setSession(result.data ?? null)
-      setError(null)
+      const nextSession = result.data?.session?.token ? (result.data ?? null) : await waitForSession()
+
+      if (!nextSession?.session?.token) {
+        setSession(nextSession ?? null)
+        setError('Session konnte nach dem Login nicht aufgebaut werden. Bitte erneut versuchen.')
+        return false
+      }
+
+      setSession(nextSession)
       await saveProfile(
-        result.data?.user?.name || email.split('@')[0] || 'Neon User',
-        getSessionToken(result.data ?? null),
+        nextSession.user?.name || email.split('@')[0] || 'Neon User',
+        getSessionToken(nextSession),
       )
       return true
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : 'Login fehlgeschlagen.')
+      return false
     } finally {
       setIsLoading(false)
     }
@@ -116,6 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     name: string
   }) => {
     setIsLoading(true)
+    setError(null)
 
     try {
       const result = await getBetterAuthClient().signUp.email({
@@ -130,7 +158,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       setSession(result.data ?? null)
-      setError(null)
 
       if (!result.data?.session?.token) {
         return { ok: true, needsLogin: true }
@@ -138,6 +165,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       await saveProfile(name, getSessionToken(result.data ?? null))
       return { ok: true }
+    } catch (signupError) {
+      setError(signupError instanceof Error ? signupError.message : 'Registrierung fehlgeschlagen.')
+      return { ok: false }
     } finally {
       setIsLoading(false)
     }

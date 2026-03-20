@@ -21,26 +21,21 @@ app.get('/api/health', async () => ({ ok: true }))
 
 app.get('/api/permalinks/:token', async (request, reply) => {
   try {
-    const authToken = getBearerToken(request, reply)
-    if (!authToken) return
-
     const params = request.params as { token: string }
     const pin = String((request.query as { pin?: string } | undefined)?.pin ?? '').trim()
-    const db = createPublicDatabaseClient(authToken)
-    const permalinkResult = await db
-      .from('permalinks')
-      .select(
-        'id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, pin_hash, expires_at, created_at',
-      )
-      .eq('token', params.token)
-      .maybeSingle()
+    const db = createPublicDatabaseClient()
+    const permalinkResult = await db.rpc('get_permalink_access', {
+      permalink_token: params.token,
+    })
 
     if (permalinkResult.error) {
       request.log.error(permalinkResult.error)
       return reply.code(500).send({ error: permalinkResult.error.message })
     }
 
-    const permalink = permalinkResult.data
+    const permalink = Array.isArray(permalinkResult.data)
+      ? permalinkResult.data[0]
+      : permalinkResult.data
 
     if (!permalink) {
       return reply.code(404).send({ error: 'Permalink wurde nicht gefunden.' })
@@ -69,28 +64,13 @@ app.get('/api/permalinks/:token', async (request, reply) => {
       }
     }
 
-    const mailboxResult = await db
-      .from('mailboxes')
-      .select('id, host, port, secure, username, encrypted_password, folder')
-      .eq('id', permalink.mailbox_id)
-      .maybeSingle()
-
-    if (mailboxResult.error) {
-      request.log.error(mailboxResult.error)
-      return reply.code(500).send({ error: mailboxResult.error.message })
-    }
-
-    if (!mailboxResult.data) {
-      return reply.code(404).send({ error: 'Zu diesem Permalink wurde keine Mailbox gefunden.' })
-    }
-
     const thread = await loadThreadDetail({
-      host: mailboxResult.data.host,
-      port: mailboxResult.data.port,
-      secure: mailboxResult.data.secure,
-      username: mailboxResult.data.username,
-      password: decryptSecret(mailboxResult.data.encrypted_password, serverEnv.cryptoSecret),
-      folder: mailboxResult.data.folder,
+      host: permalink.host,
+      port: permalink.port,
+      secure: permalink.secure,
+      username: permalink.username,
+      password: decryptSecret(permalink.encrypted_password, serverEnv.cryptoSecret),
+      folder: permalink.folder,
       threadId: permalink.thread_id,
     })
 

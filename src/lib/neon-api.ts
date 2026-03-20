@@ -109,11 +109,9 @@ export function createPermalink(
   })
 }
 
-export async function loadPublicPermalink(token: string, authToken?: string | null, pin?: string) {
+export async function loadPublicPermalink(token: string, pin?: string) {
   const query = pin ? `?pin=${encodeURIComponent(pin)}` : ''
-  const response = await fetch(`${apiBaseUrl}/api/permalinks/${token}${query}`, {
-    headers: authToken ? { authorization: `Bearer ${authToken}` } : undefined,
-  })
+  const response = await fetch(`${apiBaseUrl}/api/permalinks/${token}${query}`)
   const rawText = await response.text()
   const payload = (
     rawText

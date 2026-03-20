@@ -57,13 +57,24 @@ export interface PublicPermalinkRecord {
   has_pin?: boolean
   snippet?: string
   thread?: {
-    id: string
-    subject: string
-    from: string
-    to: string
-    date: string
-    snippet: string
-    body: string
+    root: {
+      id: string
+      subject: string
+      from: string
+      to: string
+      date: string
+      snippet: string
+      body: string
+    }
+    messages: Array<{
+      id: string
+      subject: string
+      from: string
+      to: string
+      date: string
+      snippet: string
+      body: string
+    }>
   }
 }
 

@@ -62,4 +62,52 @@ create index if not exists permalinks_user_id_idx on public.permalinks (user_id)
 create index if not exists permalinks_mailbox_id_idx on public.permalinks (mailbox_id);
 create index if not exists permalinks_token_idx on public.permalinks (token);
 
+create or replace function public.get_permalink_access(permalink_token text)
+returns table (
+  mailbox_id uuid,
+  thread_id text,
+  subject text,
+  from_label text,
+  email_date timestamptz,
+  snippet text,
+  has_pin boolean,
+  pin_hash text,
+  expires_at timestamptz,
+  host text,
+  port integer,
+  secure boolean,
+  username text,
+  encrypted_password text,
+  folder text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    p.mailbox_id,
+    p.thread_id,
+    p.subject,
+    p.from_label,
+    p.email_date,
+    p.snippet,
+    p.has_pin,
+    p.pin_hash,
+    p.expires_at,
+    m.host,
+    m.port,
+    m.secure,
+    m.username,
+    m.encrypted_password,
+    m.folder
+  from public.permalinks p
+  join public.mailboxes m on m.id = p.mailbox_id
+  where p.token = permalink_token
+  limit 1;
+$$;
+
+revoke all on function public.get_permalink_access(text) from public;
+grant execute on function public.get_permalink_access(text) to anonymous;
+grant execute on function public.get_permalink_access(text) to authenticated;
+
 notify pgrst, 'reload schema';

@@ -1,3 +1,4 @@
+import { createClient } from '@neondatabase/neon-js'
 import { NeonPostgrestClient, fetchWithToken } from '@neondatabase/postgrest-js'
 import { serverEnv } from './env.js'
 
@@ -111,13 +112,14 @@ export function createDatabaseClient(token: string) {
   })
 }
 
-export function createPublicDatabaseClient(token: string) {
-  return new NeonPostgrestClient<Database>({
-    dataApiUrl: serverEnv.neonDataApiUrl,
-    options: {
-      global: {
-        fetch: fetchWithToken(async () => token),
-      },
+export function createPublicDatabaseClient() {
+  return createClient<Database>({
+    auth: {
+      url: serverEnv.neonAuthUrl,
+      allowAnonymous: true,
+    },
+    dataApi: {
+      url: serverEnv.neonDataApiUrl,
     },
   })
 }

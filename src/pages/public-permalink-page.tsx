@@ -7,7 +7,6 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { loadPublicPermalink } from '../lib/neon-api'
 import type { PublicPermalinkRecord } from '../lib/types'
-import { useAuth } from '../lib/use-auth'
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString('de-DE', {
@@ -16,16 +15,30 @@ function formatDate(value: string) {
   })
 }
 
+function toParagraphs(value: string) {
+  return value
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\n+/g, ' ').trim())
+    .filter(Boolean)
+}
+
+function getFolderLabel(messageId: string) {
+  const separatorIndex = messageId.indexOf(':')
+  if (separatorIndex === -1) {
+    return null
+  }
+
+  const folder = messageId.slice(0, separatorIndex)
+  return folder || null
+}
+
 export function PublicPermalinkPage() {
-  const { session } = useAuth()
   const { token } = useParams<{ token: string }>()
   const [pin, setPin] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [permalink, setPermalink] = useState<PublicPermalinkRecord | null>(null)
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
-
-  const sessionToken = session?.session?.token ?? null
 
   const load = useCallback(async (nextPin?: string) => {
     if (!token) {
@@ -37,7 +50,7 @@ export function PublicPermalinkPage() {
     setError(null)
 
     try {
-      const result = await loadPublicPermalink(token, sessionToken, nextPin)
+      const result = await loadPublicPermalink(token, nextPin)
       setPermalink(result)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Permalink konnte nicht geladen werden.')
@@ -45,13 +58,16 @@ export function PublicPermalinkPage() {
       setHasLoadedOnce(true)
       setIsLoading(false)
     }
-  }, [sessionToken, token])
+  }, [token])
 
   useEffect(() => {
     void load()
   }, [load])
 
   const isLocked = permalink?.locked === true
+  const threadMessages = permalink?.thread?.messages ?? []
+  const rootThread = permalink?.thread?.root ?? null
+  const visibleMessages = threadMessages.length > 0 ? threadMessages : rootThread ? [rootThread] : []
 
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] px-4 py-10 sm:px-6">
@@ -116,20 +132,41 @@ export function PublicPermalinkPage() {
 
             {!isLocked && permalink?.thread ? (
               <div className="space-y-4">
-                <div className="rounded-[24px] border border-slate-200 bg-white px-5 py-5">
-                  <div className="space-y-2 border-b border-slate-200 pb-4">
-                    <div className="text-sm text-slate-600">
-                      <span className="font-medium text-slate-950">From:</span> {permalink.thread.from}
-                    </div>
-                    <div className="text-sm text-slate-600">
-                      <span className="font-medium text-slate-950">To:</span> {permalink.thread.to}
-                    </div>
-                    <div className="text-sm text-slate-600">
-                      <span className="font-medium text-slate-950">Date:</span> {formatDate(permalink.thread.date)}
-                    </div>
+                <div className="rounded-[24px] border border-slate-200 bg-white">
+                  <div className="border-b border-slate-200 px-5 py-4">
+                    <p className="text-sm text-slate-500">{visibleMessages.length} E-Mails</p>
                   </div>
-                  <div className="mt-5 whitespace-pre-wrap break-words text-sm leading-7 text-slate-800">
-                    {permalink.thread.body || permalink.thread.snippet}
+
+                  <div className="divide-y divide-slate-200">
+                    {visibleMessages.map((message, index) => {
+                      const currentFolder = getFolderLabel(message.id)
+                      const previousFolder = index > 0 ? getFolderLabel(visibleMessages[index - 1].id) : null
+                      const shouldShowFolder = index > 0 && currentFolder && currentFolder !== previousFolder
+
+                      return (
+                        <div key={message.id}>
+                          {shouldShowFolder ? (
+                            <div className="border-b border-slate-200 bg-slate-50 px-5 py-3 text-sm text-slate-400">
+                              Gefunden im Postfach „{currentFolder}“
+                            </div>
+                          ) : null}
+
+                          <div className="bg-white px-5 py-5">
+                            <div className="border-b border-slate-200 pb-4">
+                              <p className="text-xs text-slate-400">from {message.from} to {message.to}</p>
+                              <p className="mt-1 font-medium text-slate-950">{message.subject}</p>
+                              <p className="mt-1 text-sm text-slate-600">{formatDate(message.date)}</p>
+                            </div>
+
+                            <div className="mt-4 space-y-3 break-words text-sm leading-6 text-slate-800">
+                              {toParagraphs(message.body || message.snippet).map((paragraph, paragraphIndex) => (
+                                <p key={`${message.id}-${paragraphIndex}`}>{paragraph}</p>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               </div>

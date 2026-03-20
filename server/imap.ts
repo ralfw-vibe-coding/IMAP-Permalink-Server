@@ -18,6 +18,16 @@ export interface MailThreadDetail {
   body: string
 }
 
+export interface MailThreadMessage {
+  id: string
+  subject: string
+  from: string
+  to: string
+  date: string
+  snippet: string
+  body: string
+}
+
 interface LoadInboxThreadsInput {
   host: string
   port: number
@@ -38,6 +48,22 @@ function htmlToSnippet(value: string) {
     .replace(/<\/li>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function htmlToText(value: string) {
+  return value
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<li>/gi, '• ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+\n/g, '\n')
     .trim()
 }
 
@@ -93,6 +119,7 @@ function parseHeaders(headerText: string) {
 
   return headers
 }
+
 
 function parseContentType(value: string | undefined) {
   const fallback = { mimeType: 'text/plain', params: new Map<string, string>() }
@@ -199,8 +226,73 @@ function formatAddressList(addresses: Array<{ name?: string | null; address?: st
   }
 
   return addresses
-    .map((entry) => entry.name || entry.address || 'Unbekannt')
+    .map((entry) => {
+      const name = entry.name?.trim()
+      const address = entry.address?.trim()
+
+      if (name && address) {
+        return `${name} <${address}>`
+      }
+
+      return name || address || 'Unbekannt'
+    })
     .join(', ')
+}
+
+function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_, codePoint) => {
+      const parsed = Number.parseInt(codePoint, 10)
+      return Number.isNaN(parsed) ? _ : String.fromCodePoint(parsed)
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, codePoint) => {
+      const parsed = Number.parseInt(codePoint, 16)
+      return Number.isNaN(parsed) ? _ : String.fromCodePoint(parsed)
+    })
+}
+
+function normalizeForComparison(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function cleanBodyText(value: string, subject?: string) {
+  return postProcessBodyText(
+    value
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2060/g, '')
+    .trim(),
+    subject,
+  )
+}
+
+function postProcessBodyText(value: string, subject?: string) {
+  const normalizedSubject = subject ? normalizeForComparison(subject) : ''
+  const lines = decodeHtmlEntities(value)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(bild anzeigen|view in browser|open in browser|caption:)/i.test(line))
+    .filter((line) => !/^<?https?:\/\/\S{80,}>?$/i.test(line))
+    .filter((line) => !/^https?:\/\/\S{120,}$/i.test(line))
+    .filter((line) => !/^<https?:\/\/\S+>$/i.test(line))
+    .filter((line) => (line.match(/&#\d+;/g)?.length ?? 0) < 3)
+    .filter((line) => {
+      if (!normalizedSubject) return true
+      return !normalizeForComparison(line).startsWith(normalizedSubject)
+    })
+
+  return lines.join('\n\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 export async function loadInboxThreads({
@@ -239,13 +331,17 @@ export async function loadInboxThreads({
       })) {
         const source = message.source?.toString('utf8') ?? ''
         const { text, html } = parseMimeBody(source)
+        const cleanedText = cleanBodyText(
+          html ? htmlToText(html) : text,
+          message.envelope?.subject || '(Ohne Betreff)',
+        )
 
         messages.push({
           id: String(message.uid),
           subject: message.envelope?.subject || '(Ohne Betreff)',
           from: formatAddressList(message.envelope?.from),
           date: (message.envelope?.date || new Date()).toISOString(),
-          snippet: normalizeSnippet(text, html),
+          snippet: normalizeSnippet(cleanedText, html),
         })
       }
 
@@ -270,7 +366,7 @@ export async function loadThreadDetail({
   password,
   folder,
   threadId,
-}: LoadThreadDetailInput): Promise<MailThreadDetail> {
+}: LoadThreadDetailInput): Promise<{ root: MailThreadDetail; messages: MailThreadMessage[] }> {
   const client = new ImapFlow({
     host,
     port,
@@ -286,11 +382,15 @@ export async function loadThreadDetail({
     const mailboxLock = await client.getMailboxLock(folder)
 
     try {
-      const message = await client.fetchOne(Number(threadId), {
-        uid: true,
-        envelope: true,
-        source: true,
-      }, { uid: true })
+      const message = await client.fetchOne(
+        Number(threadId),
+        {
+          uid: true,
+          envelope: true,
+          source: true,
+        },
+        { uid: true },
+      )
 
       if (!message) {
         throw new Error('Verlinkte Mail konnte im IMAP-Postfach nicht gefunden werden.')
@@ -298,18 +398,23 @@ export async function loadThreadDetail({
 
       const source = message.source?.toString('utf8') ?? ''
       const { text, html } = parseMimeBody(source)
-      const body = text || htmlToSnippet(html)
+      const subject = message.envelope?.subject || '(Ohne Betreff)'
+      const body = cleanBodyText(html ? htmlToText(html) : text, subject)
 
-      return {
+      const root: MailThreadDetail = {
         id: String(message.uid),
-        subject: message.envelope?.subject || '(Ohne Betreff)',
+        subject,
         from: formatAddressList(message.envelope?.from),
         to: formatAddressList(message.envelope?.to),
         date: (message.envelope?.date || new Date()).toISOString(),
-        snippet: normalizeSnippet(text, html),
+        snippet: normalizeSnippet(body, html),
         body,
       }
 
+      return {
+        root,
+        messages: [root],
+      }
     } finally {
       mailboxLock.release()
     }

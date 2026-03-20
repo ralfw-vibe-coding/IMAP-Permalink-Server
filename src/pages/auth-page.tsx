@@ -14,8 +14,9 @@ interface AuthPageProps {
 export function AuthPage({ mode }: AuthPageProps) {
   const navigate = useNavigate()
   const isSignup = mode === 'signup'
-  const { error, isLoading, login, session, signup } = useAuth()
+  const { error, login, session, signup } = useAuth()
   const [localError, setLocalError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
   if (session?.user) {
     return <Navigate to="/app" replace />
@@ -40,6 +41,11 @@ export function AuthPage({ mode }: AuthPageProps) {
                 className="space-y-5"
                 onSubmit={async (event) => {
                   event.preventDefault()
+
+                  if (isSubmitting) {
+                    return
+                  }
+
                   const formData = new FormData(event.currentTarget)
                   const email = String(formData.get('email') ?? '')
                   const password = String(formData.get('password') ?? '')
@@ -48,48 +54,54 @@ export function AuthPage({ mode }: AuthPageProps) {
                   const signupName = fullName || email.split('@')[0] || 'Neon User'
 
                   setLocalError(null)
+                  setIsSubmitting(true)
 
                   if (isSignup && password !== confirmPassword) {
                     setLocalError('Die beiden Passwoerter stimmen nicht ueberein.')
+                    setIsSubmitting(false)
                     return
                   }
 
-                  if (isSignup) {
-                    const result = await signup({
+                  try {
+                    if (isSignup) {
+                      const result = await signup({
                         email,
                         password,
                         name: signupName,
                       })
 
-                    if (result.ok && result.needsLogin) {
-                      navigate('/login')
+                      if (result.ok && result.needsLogin) {
+                        navigate('/login')
+                        return
+                      }
+
+                      if (result.ok) {
+                        navigate('/app')
+                        return
+                      }
+                    } else {
+                      const success = await login({
+                        email,
+                        password,
+                      })
+
+                      if (success) {
+                        navigate('/app')
+                        return
+                      }
+                    }
+
+                    if (!isSignup) {
+                      setLocalError('E-Mail oder Passwort sind nicht korrekt.')
                       return
                     }
 
-                    if (result.ok) {
-                      navigate('/app')
-                      return
-                    }
-                  } else {
-                    const success = await login({
-                      email,
-                      password,
-                    })
-
-                    if (success) {
-                      navigate('/app')
-                      return
-                    }
+                    setLocalError(
+                      'Registrierung abgeschlossen, aber noch ohne Session. Bitte jetzt einloggen.',
+                    )
+                  } finally {
+                    setIsSubmitting(false)
                   }
-
-                  if (!isSignup) {
-                    setLocalError('Authentifizierung fehlgeschlagen. Bitte Eingaben und Neon-Konfiguration pruefen.')
-                    return
-                  }
-
-                  setLocalError(
-                    'Registrierung abgeschlossen, aber noch ohne Session. Bitte jetzt einloggen.',
-                  )
                 }}
               >
                 {isSignup ? (
@@ -132,8 +144,8 @@ export function AuthPage({ mode }: AuthPageProps) {
                   </div>
                 ) : null}
 
-                <Button className="w-full" size="lg" type="submit" disabled={isLoading}>
-                  {isSignup ? 'Konto erstellen' : 'Einloggen'}
+                <Button className="w-full" size="lg" type="submit">
+                  {isSubmitting ? 'Bitte warten ...' : isSignup ? 'Konto erstellen' : 'Einloggen'}
                 </Button>
               </form>
 
