@@ -12,6 +12,16 @@ import type {
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || ''
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 function getAuthHeaders(token: string | null | undefined) {
   if (!token) {
     throw new Error('Kein Session-Token verfuegbar. Bitte erneut einloggen.')
@@ -50,7 +60,7 @@ async function apiFetch<T>(path: string, token: string, init?: RequestInit): Pro
   }
 
   if (!response.ok) {
-    throw new Error(payload.error || rawText || `API-Fehler bei ${path}`)
+    throw new ApiError(payload.error || rawText || `API-Fehler bei ${path}`, response.status)
   }
 
   return payload.data as T

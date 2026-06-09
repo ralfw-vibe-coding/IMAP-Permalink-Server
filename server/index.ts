@@ -19,6 +19,7 @@ import { queryOne, queryRows } from './database.js'
 import { serverEnv } from './env.js'
 import { createImapJob, loadImapJob, startImapJob } from './imap-jobs.js'
 import { loadInboxThreads, loadThreadDetail } from './imap.js'
+import { readThreadSnapshot, serializeThreadSnapshot } from './permalink-snapshot.js'
 
 const app = Fastify({ logger: true })
 const serverFilePath = fileURLToPath(import.meta.url)
@@ -189,6 +190,16 @@ app.get('/api/permalinks/:token', async (request, reply) => {
       })
     }
 
+    const thread = readThreadSnapshot({
+      threadId: permalink.thread_id,
+      subject: permalink.subject,
+      fromLabel: permalink.from_label,
+      toLabel: permalink.to_label,
+      emailDate: permalink.email_date,
+      snippet: permalink.snippet,
+      body: permalink.body,
+    })
+
     return {
       data: {
         locked: false,
@@ -198,28 +209,7 @@ app.get('/api/permalinks/:token', async (request, reply) => {
         expires_at: permalink.expires_at,
         has_pin: permalink.has_pin,
         snippet: permalink.snippet,
-        thread: {
-          root: {
-            id: permalink.thread_id,
-            subject: permalink.subject,
-            from: permalink.from_label,
-            to: permalink.to_label || 'Unbekannt',
-            date: permalink.email_date,
-            snippet: permalink.snippet,
-            body: permalink.body,
-          },
-          messages: [
-            {
-              id: permalink.thread_id,
-              subject: permalink.subject,
-              from: permalink.from_label,
-              to: permalink.to_label || 'Unbekannt',
-              date: permalink.email_date,
-              snippet: permalink.snippet,
-              body: permalink.body,
-            },
-          ],
-        },
+        thread,
       },
     }
   } catch (error) {
@@ -926,6 +916,7 @@ app.post('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
     })
 
     const snapshotMessage = threadDetail.root
+    const snapshotBody = serializeThreadSnapshot(threadDetail.messages)
 
     const result = await queryOne<{
       id: string
@@ -955,7 +946,7 @@ app.post('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
         snapshotMessage.to || '',
         new Date(snapshotMessage.date || date).toISOString(),
         snapshotMessage.snippet || snippet,
-        snapshotMessage.body || '',
+        snapshotBody,
         Boolean(pin),
         pin ? createHash('sha256').update(pin).digest('hex') : null,
         expiresAt ? new Date(expiresAt).toISOString() : null,

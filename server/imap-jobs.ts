@@ -3,6 +3,7 @@ import { decryptSecret } from './crypto.js'
 import { queryOne } from './database.js'
 import { serverEnv } from './env.js'
 import { loadInboxThreads, loadThreadDetail } from './imap.js'
+import { serializeThreadSnapshot } from './permalink-snapshot.js'
 
 export type ImapJobType = 'load_threads' | 'create_permalink'
 export type ImapJobStatus = 'pending' | 'processing' | 'completed' | 'failed'
@@ -169,6 +170,7 @@ async function processCreatePermalinkJob(job: ImapJobRecord) {
   })
 
   const snapshotMessage = threadDetail.root
+  const snapshotBody = serializeThreadSnapshot(threadDetail.messages)
   const permalink = await queryOne(
     `insert into public.permalinks (
        user_id, mailbox_id, thread_id, token, subject, from_label, to_label, email_date, snippet, body, has_pin, pin_hash, expires_at
@@ -185,7 +187,7 @@ async function processCreatePermalinkJob(job: ImapJobRecord) {
       snapshotMessage.to || '',
       new Date(snapshotMessage.date || payload.date).toISOString(),
       snapshotMessage.snippet || payload.snippet,
-      snapshotMessage.body || '',
+      snapshotBody,
       Boolean(payload.pin),
       payload.pin ? createHash('sha256').update(payload.pin).digest('hex') : null,
       payload.expiresAt ? new Date(payload.expiresAt).toISOString() : null,

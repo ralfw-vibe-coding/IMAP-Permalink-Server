@@ -743,6 +743,7 @@ export function DashboardPage() {
                         <p className="font-medium text-slate-950">{thread.subject}</p>
                         <p className="mt-1 text-sm text-slate-600">
                           {thread.from} · {formatDate(thread.date)}
+                          {thread.messageCount && thread.messageCount > 1 ? ` · ${thread.messageCount} E-Mails` : ''}
                         </p>
                         <p className="mt-2 text-sm text-slate-500">{thread.snippet}</p>
                       </div>

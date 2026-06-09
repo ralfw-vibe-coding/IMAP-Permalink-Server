@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { AuthContext } from './auth-context-definition'
 import {
+  ApiError,
   loadAuthSession,
   logoutAuthSession,
   requestLoginOtp,
@@ -44,8 +45,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(data)
       setError(null)
     } catch (sessionError) {
-      void sessionError
-      clearStoredToken()
+      if (sessionError instanceof ApiError && [401, 403].includes(sessionError.status)) {
+        clearStoredToken()
+      }
       setSession(null)
       setError(null)
     } finally {

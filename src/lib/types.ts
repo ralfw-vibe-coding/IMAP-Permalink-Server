@@ -46,6 +46,7 @@ export interface InboxThreadRecord {
   from: string
   date: string
   snippet: string
+  messageCount?: number
 }
 
 export interface PermalinkRecord {

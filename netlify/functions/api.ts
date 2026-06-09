@@ -4,6 +4,7 @@ import { encryptSecret } from '../../server/crypto.js'
 import { queryOne, queryRows } from '../../server/database.js'
 import { serverEnv } from '../../server/env.js'
 import { createImapJob, loadImapJob, startImapJob } from '../../server/imap-jobs.js'
+import { readThreadSnapshot } from '../../server/permalink-snapshot.js'
 
 const jsonHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -136,15 +137,15 @@ async function handlePublicPermalink(token: string, request: Request) {
     }, 410)
   }
 
-  const message = {
-    id: permalink.thread_id,
+  const thread = readThreadSnapshot({
+    threadId: permalink.thread_id,
     subject: permalink.subject,
-    from: permalink.from_label,
-    to: permalink.to_label || 'Unbekannt',
-    date: permalink.email_date,
+    fromLabel: permalink.from_label,
+    toLabel: permalink.to_label,
+    emailDate: permalink.email_date,
     snippet: permalink.snippet,
     body: permalink.body,
-  }
+  })
 
   return json({
     data: {
@@ -155,10 +156,7 @@ async function handlePublicPermalink(token: string, request: Request) {
       expires_at: permalink.expires_at,
       has_pin: permalink.has_pin,
       snippet: permalink.snippet,
-      thread: {
-        root: message,
-        messages: [message],
-      },
+      thread,
     },
   })
 }

@@ -6,6 +6,7 @@ export interface MailThreadListItem {
   from: string
   date: string
   snippet: string
+  messageCount: number
 }
 
 export interface MailThreadDetail {
@@ -265,6 +266,95 @@ function normalizeForComparison(value: string) {
     .trim()
 }
 
+function normalizeSubject(value: string) {
+  return normalizeForComparison(value.replace(/^\s*((re|aw|fw|fwd):\s*)+/i, ''))
+}
+
+function extractMessageIds(value: string | undefined) {
+  if (!value) return []
+
+  const bracketedIds = value.match(/<[^>]+>/g) ?? []
+
+  if (bracketedIds.length > 0) {
+    return bracketedIds.map((entry) => entry.toLowerCase())
+  }
+
+  return value
+    .split(/\s+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+}
+
+function parseTopLevelHeaders(source: string) {
+  return parseHeaders(splitHeadersAndBody(source).headerText)
+}
+
+function encodeThreadId(uids: number[]) {
+  return `thread:${uids.sort((a, b) => a - b).join(',')}`
+}
+
+function decodeThreadId(threadId: string) {
+  if (!threadId.startsWith('thread:')) {
+    return [Number(threadId)].filter((uid) => Number.isFinite(uid))
+  }
+
+  return threadId
+    .slice('thread:'.length)
+    .split(',')
+    .map((entry) => Number(entry))
+    .filter((uid) => Number.isFinite(uid))
+}
+
+interface ParsedInboxMessage extends MailThreadMessage {
+  uid: number
+  messageId: string | null
+  inReplyToIds: string[]
+  referenceIds: string[]
+  subjectKey: string
+}
+
+interface ThreadGroup {
+  messages: ParsedInboxMessage[]
+  keys: Set<string>
+}
+
+function groupMessagesIntoThreads(messages: ParsedInboxMessage[]) {
+  const groups: ThreadGroup[] = []
+
+  for (const message of messages.sort((a, b) => (a.date > b.date ? 1 : -1))) {
+    const headerKeys = [
+      message.messageId,
+      ...message.inReplyToIds,
+      ...message.referenceIds,
+    ].filter((key): key is string => Boolean(key))
+    const groupKeys = headerKeys.length > 0 ? headerKeys : [`subject:${message.subjectKey}`]
+    const matchingGroups = groups.filter((group) => groupKeys.some((key) => group.keys.has(key)))
+
+    if (matchingGroups.length === 0) {
+      groups.push({
+        messages: [message],
+        keys: new Set(groupKeys),
+      })
+      continue
+    }
+
+    const [targetGroup, ...groupsToMerge] = matchingGroups
+    targetGroup.messages.push(message)
+    groupKeys.forEach((key) => targetGroup.keys.add(key))
+
+    for (const group of groupsToMerge) {
+      group.messages.forEach((entry) => targetGroup.messages.push(entry))
+      group.keys.forEach((key) => targetGroup.keys.add(key))
+      groups.splice(groups.indexOf(group), 1)
+    }
+  }
+
+  return groups.map((group) => ({
+    ...group,
+    messages: group.messages.sort((a, b) => (a.date > b.date ? 1 : -1)),
+  }))
+}
+
 function cleanBodyText(value: string, subject?: string) {
   return postProcessBodyText(
     value
@@ -302,7 +392,7 @@ export async function loadInboxThreads({
   username,
   password,
   folder,
-  limit = 20,
+  limit = 100,
 }: LoadInboxThreadsInput): Promise<MailThreadListItem[]> {
   const client = new ImapFlow({
     host,
@@ -320,10 +410,10 @@ export async function loadInboxThreads({
 
     try {
       const existingMessages = client.mailbox ? client.mailbox.exists : 0
-      const messages: MailThreadListItem[] = []
+      const messages: ParsedInboxMessage[] = []
 
       if (existingMessages === 0) {
-        return messages
+        return []
       }
 
       const sequence = `${Math.max(existingMessages - limit + 1, 1)}:*`
@@ -335,22 +425,45 @@ export async function loadInboxThreads({
         source: true,
       })) {
         const source = message.source?.toString('utf8') ?? ''
+        const headers = parseTopLevelHeaders(source)
         const { text, html } = parseMimeBody(source)
+        const subject = message.envelope?.subject || '(Ohne Betreff)'
         const cleanedText = cleanBodyText(
           html ? htmlToText(html) : text,
-          message.envelope?.subject || '(Ohne Betreff)',
+          subject,
         )
+        const uid = Number(message.uid)
 
         messages.push({
-          id: String(message.uid),
-          subject: message.envelope?.subject || '(Ohne Betreff)',
+          id: String(uid),
+          uid,
+          subject,
           from: formatAddressList(message.envelope?.from),
+          to: formatAddressList(message.envelope?.to),
           date: (message.envelope?.date || new Date()).toISOString(),
           snippet: normalizeSnippet(cleanedText, html),
+          body: cleanedText,
+          messageId: extractMessageIds(headers.get('message-id'))[0] ?? null,
+          inReplyToIds: extractMessageIds(headers.get('in-reply-to')),
+          referenceIds: extractMessageIds(headers.get('references')),
+          subjectKey: normalizeSubject(subject),
         })
       }
 
-      return messages.sort((a, b) => (a.date < b.date ? 1 : -1))
+      return groupMessagesIntoThreads(messages)
+        .map((group) => {
+          const latestMessage = group.messages[group.messages.length - 1]
+
+          return {
+            id: encodeThreadId(group.messages.map((message) => message.uid)),
+            subject: latestMessage.subject,
+            from: latestMessage.from,
+            date: latestMessage.date,
+            snippet: latestMessage.snippet,
+            messageCount: group.messages.length,
+          }
+        })
+        .sort((a, b) => (a.date < b.date ? 1 : -1))
     } finally {
       mailboxLock.release()
     }
@@ -387,38 +500,49 @@ export async function loadThreadDetail({
     const mailboxLock = await client.getMailboxLock(folder)
 
     try {
-      const message = await client.fetchOne(
-        Number(threadId),
-        {
-          uid: true,
-          envelope: true,
-          source: true,
-        },
-        { uid: true },
-      )
+      const messages: MailThreadMessage[] = []
 
-      if (!message) {
+      for (const uid of decodeThreadId(threadId)) {
+        const message = await client.fetchOne(
+          uid,
+          {
+            uid: true,
+            envelope: true,
+            source: true,
+          },
+          { uid: true },
+        )
+
+        if (!message) {
+          continue
+        }
+
+        const source = message.source?.toString('utf8') ?? ''
+        const { text, html } = parseMimeBody(source)
+        const subject = message.envelope?.subject || '(Ohne Betreff)'
+        const body = cleanBodyText(html ? htmlToText(html) : text, subject)
+
+        messages.push({
+          id: String(message.uid),
+          subject,
+          from: formatAddressList(message.envelope?.from),
+          to: formatAddressList(message.envelope?.to),
+          date: (message.envelope?.date || new Date()).toISOString(),
+          snippet: normalizeSnippet(body, html),
+          body,
+        })
+      }
+
+      if (messages.length === 0) {
         throw new Error('Verlinkte Mail konnte im IMAP-Postfach nicht gefunden werden.')
       }
 
-      const source = message.source?.toString('utf8') ?? ''
-      const { text, html } = parseMimeBody(source)
-      const subject = message.envelope?.subject || '(Ohne Betreff)'
-      const body = cleanBodyText(html ? htmlToText(html) : text, subject)
-
-      const root: MailThreadDetail = {
-        id: String(message.uid),
-        subject,
-        from: formatAddressList(message.envelope?.from),
-        to: formatAddressList(message.envelope?.to),
-        date: (message.envelope?.date || new Date()).toISOString(),
-        snippet: normalizeSnippet(body, html),
-        body,
-      }
+      messages.sort((a, b) => (a.date > b.date ? 1 : -1))
+      const root = messages[messages.length - 1]
 
       return {
         root,
-        messages: [root],
+        messages,
       }
     } finally {
       mailboxLock.release()
