@@ -4,6 +4,7 @@ import type {
   CreatePermalinkJobResult,
   ImapJobRecord,
   LoadThreadsJobResult,
+  MailFolderRecord,
   MailboxRecord,
   PermalinkRecord,
   ProfileRecord,
@@ -160,11 +161,15 @@ export function loadMailboxThreads(mailboxId: string, token: string) {
   return apiFetch<InboxThreadRecord[]>(`/api/mailboxes/${mailboxId}/threads`, token)
 }
 
-export function startLoadMailboxThreadsJob(mailboxId: string, token: string) {
+export function loadMailboxFolders(mailboxId: string, token: string) {
+  return apiFetch<MailFolderRecord[]>(`/api/mailboxes/${mailboxId}/folders`, token)
+}
+
+export function startLoadMailboxThreadsJob(mailboxId: string, token: string, folders?: string[]) {
   return apiFetch<ImapJobRecord<LoadThreadsJobResult>>(
     `/api/mailboxes/${mailboxId}/threads/jobs`,
     token,
-    { method: 'POST' },
+    { method: 'POST', body: JSON.stringify({ folders }) },
   )
 }
 

@@ -18,7 +18,7 @@ import { decryptSecret, encryptSecret } from './crypto.js'
 import { queryOne, queryRows } from './database.js'
 import { serverEnv } from './env.js'
 import { createImapJob, loadImapJob, startImapJob } from './imap-jobs.js'
-import { loadInboxThreads, loadThreadDetail } from './imap.js'
+import { listMailboxFolders, loadInboxThreads, loadThreadDetail } from './imap.js'
 import { readThreadSnapshot, serializeThreadSnapshot } from './permalink-snapshot.js'
 
 const app = Fastify({ logger: true })
@@ -491,6 +491,10 @@ app.post('/api/mailboxes/:mailboxId/threads/jobs', async (request, reply) => {
   }
 
   const params = request.params as { mailboxId: string }
+  const body = request.body as { folders?: string[] } | undefined
+  const folders = Array.isArray(body?.folders)
+    ? body.folders.map((folder) => String(folder).trim()).filter(Boolean)
+    : undefined
 
   try {
     const mailbox = await queryOne<{ id: string }>(
@@ -509,7 +513,7 @@ app.post('/api/mailboxes/:mailboxId/threads/jobs', async (request, reply) => {
       userId,
       mailboxId: params.mailboxId,
       type: 'load_threads',
-      payload: { mailboxId: params.mailboxId },
+      payload: { mailboxId: params.mailboxId, ...(folders?.length ? { folders } : {}) },
     })
 
     startImapJob(job.id)
@@ -519,6 +523,56 @@ app.post('/api/mailboxes/:mailboxId/threads/jobs', async (request, reply) => {
     request.log.error(error)
     return reply.code(500).send({
       error: error instanceof Error ? error.message : 'Thread-Ladejob konnte nicht gestartet werden.',
+    })
+  }
+})
+
+app.get('/api/mailboxes/:mailboxId/folders', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  const userId = await getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+  }
+
+  const params = request.params as { mailboxId: string }
+
+  try {
+    const mailbox = await queryOne<{
+      id: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      encrypted_password: string
+      folder: string
+    }>(
+      `select id, host, port, secure, username, encrypted_password, folder
+       from public.mailboxes
+       where id = $1 and user_id = $2
+       limit 1`,
+      [params.mailboxId, userId],
+    )
+
+    if (!mailbox) {
+      return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
+    }
+
+    const folders = await listMailboxFolders({
+      host: mailbox.host,
+      port: mailbox.port,
+      secure: mailbox.secure,
+      username: mailbox.username,
+      password: decryptSecret(mailbox.encrypted_password, serverEnv.cryptoSecret),
+      folder: mailbox.folder,
+    })
+
+    return { data: folders }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'Folder konnten nicht geladen werden.',
     })
   }
 })

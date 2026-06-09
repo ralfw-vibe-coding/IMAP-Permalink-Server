@@ -20,6 +20,7 @@ import {
   deleteMailbox,
   deletePermalink,
   loadImapJob,
+  loadMailboxFolders,
 	  loadMailboxes,
 	  loadMailboxPermalinks,
 	  loadProfile,
@@ -33,6 +34,7 @@ import type {
   ImapJobStatus,
   InboxThreadRecord,
   LoadThreadsJobResult,
+  MailFolderRecord,
   MailboxRecord,
   PermalinkRecord,
 } from '../lib/types'
@@ -112,6 +114,10 @@ export function DashboardPage() {
   const [isPermalinkOverlayOpen, setIsPermalinkOverlayOpen] = useState(false)
 	  const [editingMailbox, setEditingMailbox] = useState<MailboxRecord | null>(null)
 	  const [editingPermalink, setEditingPermalink] = useState<PermalinkRecord | null>(null)
+  const [folderOptions, setFolderOptions] = useState<MailFolderRecord[]>([])
+  const [selectedFolderPaths, setSelectedFolderPaths] = useState<string[]>([])
+  const [isLoadingFolders, setIsLoadingFolders] = useState(false)
+  const [folderError, setFolderError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'inbox' | 'permalinks'>('inbox')
   const [selectedThread, setSelectedThread] = useState<InboxThreadViewRecord | null>(null)
   const [successToast, setSuccessToast] = useState<string | null>(null)
@@ -162,6 +168,69 @@ export function DashboardPage() {
   }, [mailboxes])
 
   useEffect(() => {
+    let isCancelled = false
+
+    const run = async () => {
+      if (!sessionToken || !selectedMailbox) {
+        setFolderOptions([])
+        setSelectedFolderPaths([])
+        setIsLoadingFolders(false)
+        setFolderError(null)
+        return
+      }
+
+      const defaultFolder = selectedMailbox.folder || 'INBOX'
+      setSelectedFolderPaths([defaultFolder])
+      setFolderOptions([
+        {
+          path: defaultFolder,
+          name: defaultFolder,
+          specialUse: defaultFolder.toLowerCase() === 'inbox' ? '\\Inbox' : null,
+          isStandard: true,
+        },
+      ])
+      setIsLoadingFolders(true)
+      setFolderError(null)
+
+      try {
+        const loadedFolders = await loadMailboxFolders(selectedMailbox.id, sessionToken)
+        const hasDefaultFolder = loadedFolders.some(
+          (folder) => folder.path.toLowerCase() === defaultFolder.toLowerCase(),
+        )
+        const nextFolders = hasDefaultFolder
+          ? loadedFolders
+          : [
+              {
+                path: defaultFolder,
+                name: defaultFolder,
+                specialUse: defaultFolder.toLowerCase() === 'inbox' ? '\\Inbox' : null,
+                isStandard: true,
+              },
+              ...loadedFolders,
+            ]
+
+        if (!isCancelled) {
+          setFolderOptions(nextFolders)
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setFolderError(error instanceof Error ? error.message : 'Folder konnten nicht geladen werden.')
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingFolders(false)
+        }
+      }
+    }
+
+    void run()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [selectedMailbox, sessionToken])
+
+  useEffect(() => {
 	    let isCancelled = false
 	
 	    const run = async () => {
@@ -186,7 +255,11 @@ export function DashboardPage() {
 	      try {
 	        const loadedThreads = await Promise.all(
 	          targetMailboxes.map(async (mailbox) => {
-	            const startedJob = await startLoadMailboxThreadsJob(mailbox.id, sessionToken)
+	            const foldersForMailbox =
+	              selectedMailbox?.id === mailbox.id && selectedFolderPaths.length > 0
+	                ? selectedFolderPaths
+	                : undefined
+	            const startedJob = await startLoadMailboxThreadsJob(mailbox.id, sessionToken, foldersForMailbox)
 	            let currentJob = startedJob
 	
 	            for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -235,7 +308,7 @@ export function DashboardPage() {
 	    return () => {
 	      isCancelled = true
 	    }
-	  }, [mailboxes, selectedMailboxIds, selectedMailboxes, sessionToken])
+	  }, [mailboxes, selectedFolderPaths, selectedMailbox, selectedMailboxIds, selectedMailboxes, sessionToken])
 
   const copyPermalinkToClipboard = async (token: string) => {
     await navigator.clipboard.writeText(getPermalinkUrl(token))
@@ -702,18 +775,68 @@ export function DashboardPage() {
             ) : (
               <Card className="border-slate-200/80 shadow-none">
                 <CardHeader>
-                  <CardTitle className="text-xl">Threads in der INBOX</CardTitle>
+                  <CardTitle className="text-xl">E-Mail-Threads</CardTitle>
                   <CardDescription>
                     Hier waehlt man einen Thread aus und legt dafuer in einem Overlay einen neuen Permalink an.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
+	                  {selectedMailbox ? (
+	                    <div className="space-y-2 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+	                      <div className="flex items-center justify-between gap-3">
+	                        <p className="text-sm font-medium text-slate-700">Folder</p>
+	                        {isLoadingFolders ? (
+	                          <div className="flex items-center gap-2 text-xs text-slate-500">
+	                            <LoaderCircle className="size-3.5 animate-spin" />
+	                            werden geladen
+	                          </div>
+	                        ) : null}
+	                      </div>
+	                      <div className="flex flex-wrap gap-2">
+	                        {folderOptions.map((folder) => {
+	                          const isSelected = selectedFolderPaths.includes(folder.path)
+
+	                          return (
+	                            <button
+	                              key={folder.path}
+	                              className={[
+	                                'rounded-full border px-3 py-1.5 text-sm font-medium transition',
+	                                isSelected
+	                                  ? 'border-slate-950 bg-slate-950 text-white'
+	                                  : folder.isStandard
+	                                    ? 'border-slate-300 bg-slate-50 text-slate-700 hover:border-slate-400'
+	                                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-950',
+	                              ].join(' ')}
+	                              onClick={() => {
+	                                setSelectedFolderPaths((current) => {
+	                                  if (current.includes(folder.path)) {
+	                                    return current.length > 1
+	                                      ? current.filter((path) => path !== folder.path)
+	                                      : current
+	                                  }
+
+	                                  return [...current, folder.path]
+	                                })
+	                              }}
+	                              type="button"
+	                            >
+	                              {folder.name || folder.path}
+	                            </button>
+	                          )
+	                        })}
+	                      </div>
+	                      {folderError ? (
+	                        <p className="text-sm text-rose-600">{folderError}</p>
+	                      ) : null}
+	                    </div>
+	                  ) : null}
+
 	                  {isLoadingThreads ? (
 	                    <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
 	                      <LoaderCircle className="size-4 animate-spin" />
 	                      {threadJobStatus === 'processing'
 	                        ? 'IMAP-Server wird im Hintergrund abgefragt...'
-	                        : 'INBOX wird geladen...'}
+	                        : 'E-Mails werden geladen...'}
 	                    </div>
 	                  ) : null}
 	
@@ -730,13 +853,23 @@ export function DashboardPage() {
 	                    return (
 	                    <div
 	                      key={`${thread.mailbox_id}-${thread.id}`}
-	                      className="flex flex-col gap-4 rounded-[24px] border border-slate-200 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+	                      className="rounded-[24px] border border-slate-200 bg-white px-4 py-4"
 	                      style={{
 	                        borderLeftColor: threadColor.accent,
 	                        borderLeftWidth: 6,
 	                      }}
 	                    >
-	                      <div className="min-w-0">
+	                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+	                        <div className="min-w-0 flex-1">
+	                          {thread.folders && thread.folders.length > 0 ? (
+	                            <div className="mb-2 flex flex-wrap justify-start gap-1.5 sm:float-right sm:ml-3 sm:justify-end">
+	                              {thread.folders.map((folder) => (
+	                                <Badge key={folder} className="min-h-6 px-2 py-0.5 text-[11px]" variant="default">
+	                                  {folder}
+	                                </Badge>
+	                              ))}
+	                            </div>
+	                          ) : null}
 	                        <p className="text-xs text-slate-400">
 	                          {mailbox?.label ? `${mailbox.label} · ` : ''}from {thread.from} to {mailbox?.username ?? 'dein Postfach'}
 	                        </p>
@@ -759,6 +892,7 @@ export function DashboardPage() {
                         <LinkIcon className="size-4" />
 	                        Permalink anlegen
 	                      </Button>
+	                      </div>
 	                    </div>
 	                    )
 	                  })}

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import { requestOtp, verifyOtp, getSessionFromToken, revokeSession, getAuthenticatedUserId } from '../../server/auth.js'
-import { encryptSecret } from '../../server/crypto.js'
+import { decryptSecret, encryptSecret } from '../../server/crypto.js'
 import { queryOne, queryRows } from '../../server/database.js'
 import { serverEnv } from '../../server/env.js'
 import { createImapJob, loadImapJob, startImapJob } from '../../server/imap-jobs.js'
+import { listMailboxFolders } from '../../server/imap.js'
 import { readThreadSnapshot } from '../../server/permalink-snapshot.js'
 
 const jsonHeaders = {
@@ -427,6 +428,10 @@ async function handleRequest(request: Request) {
     }
 
     if (parts[3] === 'threads' && parts[4] === 'jobs' && request.method === 'POST') {
+      const body = await readJson(request)
+      const folders = Array.isArray(body.folders)
+        ? body.folders.map((folder) => String(folder).trim()).filter(Boolean)
+        : undefined
       const mailbox = await queryOne(
         `select id from public.mailboxes where id = $1 and user_id = $2 limit 1`,
         [mailboxId, userId],
@@ -440,11 +445,44 @@ async function handleRequest(request: Request) {
         userId,
         mailboxId,
         type: 'load_threads',
-        payload: { mailboxId },
+        payload: { mailboxId, ...(folders?.length ? { folders } : {}) },
       })
 
       await kickOffImapBackgroundJob(request, job.id)
       return json({ data: job }, 202)
+    }
+
+    if (parts[3] === 'folders' && request.method === 'GET') {
+      const mailbox = await queryOne<{
+        id: string
+        host: string
+        port: number
+        secure: boolean
+        username: string
+        encrypted_password: string
+        folder: string
+      }>(
+        `select id, host, port, secure, username, encrypted_password, folder
+         from public.mailboxes
+         where id = $1 and user_id = $2
+         limit 1`,
+        [mailboxId, userId],
+      )
+
+      if (!mailbox) {
+        return json({ error: 'Mailbox nicht gefunden.' }, 404)
+      }
+
+      const folders = await listMailboxFolders({
+        host: mailbox.host,
+        port: mailbox.port,
+        secure: mailbox.secure,
+        username: mailbox.username,
+        password: decryptSecret(mailbox.encrypted_password, serverEnv.cryptoSecret),
+        folder: mailbox.folder,
+      })
+
+      return json({ data: folders })
     }
 
     if (parts[3] === 'permalink-jobs' && request.method === 'POST') {

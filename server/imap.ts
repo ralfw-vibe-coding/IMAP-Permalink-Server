@@ -7,6 +7,14 @@ export interface MailThreadListItem {
   date: string
   snippet: string
   messageCount: number
+  folders: string[]
+}
+
+export interface MailFolderListItem {
+  path: string
+  name: string
+  specialUse: string | null
+  isStandard: boolean
 }
 
 export interface MailThreadDetail {
@@ -36,6 +44,7 @@ interface LoadInboxThreadsInput {
   username: string
   password: string
   folder: string
+  folders?: string[]
   limit?: number
 }
 
@@ -289,23 +298,40 @@ function parseTopLevelHeaders(source: string) {
   return parseHeaders(splitHeadersAndBody(source).headerText)
 }
 
-function encodeThreadId(uids: number[]) {
-  return `thread:${uids.sort((a, b) => a - b).join(',')}`
+function encodeThreadId(messages: Array<{ folder: string; uid: number }>) {
+  return `thread:${messages
+    .sort((a, b) => a.folder.localeCompare(b.folder) || a.uid - b.uid)
+    .map((entry) => `${encodeURIComponent(entry.folder)}:${entry.uid}`)
+    .join(',')}`
 }
 
-function decodeThreadId(threadId: string) {
+function decodeThreadId(threadId: string, fallbackFolder: string) {
   if (!threadId.startsWith('thread:')) {
-    return [Number(threadId)].filter((uid) => Number.isFinite(uid))
+    return [Number(threadId)]
+      .filter((uid) => Number.isFinite(uid))
+      .map((uid) => ({ folder: fallbackFolder, uid }))
   }
 
   return threadId
     .slice('thread:'.length)
     .split(',')
-    .map((entry) => Number(entry))
-    .filter((uid) => Number.isFinite(uid))
+    .map((entry) => {
+      const separatorIndex = entry.lastIndexOf(':')
+
+      if (separatorIndex === -1) {
+        const uid = Number(entry)
+        return Number.isFinite(uid) ? { folder: fallbackFolder, uid } : null
+      }
+
+      const folder = decodeURIComponent(entry.slice(0, separatorIndex))
+      const uid = Number(entry.slice(separatorIndex + 1))
+      return folder && Number.isFinite(uid) ? { folder, uid } : null
+    })
+    .filter((entry): entry is { folder: string; uid: number } => Boolean(entry))
 }
 
 interface ParsedInboxMessage extends MailThreadMessage {
+  folder: string
   uid: number
   messageId: string | null
   inReplyToIds: string[]
@@ -316,6 +342,44 @@ interface ParsedInboxMessage extends MailThreadMessage {
 interface ThreadGroup {
   messages: ParsedInboxMessage[]
   keys: Set<string>
+}
+
+const standardSpecialUses = new Set(['\\Inbox', '\\Sent', '\\Drafts', '\\Trash', '\\Junk', '\\Archive'])
+const standardFolderNames = new Set([
+  'inbox',
+  'sent',
+  'sent messages',
+  'sent mail',
+  'drafts',
+  'trash',
+  'deleted messages',
+  'junk',
+  'spam',
+  'archive',
+  'all mail',
+])
+
+function isStandardFolder(folder: { path: string; name: string; specialUse?: string | null }) {
+  return Boolean(folder.specialUse && standardSpecialUses.has(folder.specialUse)) ||
+    standardFolderNames.has(folder.path.toLowerCase()) ||
+    standardFolderNames.has(folder.name.toLowerCase())
+}
+
+function uniqueFolders(folders: string[]) {
+  const seen = new Set<string>()
+
+  return folders
+    .map((folder) => folder.trim())
+    .filter((folder) => {
+      const key = folder.toLowerCase()
+
+      if (!folder || seen.has(key)) {
+        return false
+      }
+
+      seen.add(key)
+      return true
+    })
 }
 
 function groupMessagesIntoThreads(messages: ParsedInboxMessage[]) {
@@ -385,6 +449,57 @@ function postProcessBodyText(value: string, subject?: string) {
   return lines.join('\n\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
+export async function listMailboxFolders({
+  host,
+  port,
+  secure,
+  username,
+  password,
+  folder,
+}: LoadInboxThreadsInput): Promise<MailFolderListItem[]> {
+  const client = new ImapFlow({
+    host,
+    port,
+    secure,
+    auth: {
+      user: username,
+      pass: password,
+    },
+  })
+
+  try {
+    await client.connect()
+    const folders = await client.list()
+    const hasConfiguredFolder = folders.some((entry) => entry.path.toLowerCase() === folder.toLowerCase())
+    const mappedFolders = folders
+      .filter((entry) => !entry.flags.has('\\Noselect'))
+      .map((entry) => ({
+        path: entry.path,
+        name: entry.name || entry.path,
+        specialUse: entry.specialUse ?? null,
+        isStandard: isStandardFolder(entry),
+      }))
+
+    if (!hasConfiguredFolder) {
+      mappedFolders.push({
+        path: folder,
+        name: folder,
+        specialUse: folder.toLowerCase() === 'inbox' ? '\\Inbox' : null,
+        isStandard: isStandardFolder({ path: folder, name: folder, specialUse: null }),
+      })
+    }
+
+    return mappedFolders.sort((a, b) => {
+      if (a.path.toLowerCase() === 'inbox') return -1
+      if (b.path.toLowerCase() === 'inbox') return 1
+      if (a.isStandard !== b.isStandard) return a.isStandard ? -1 : 1
+      return a.path.localeCompare(b.path)
+    })
+  } finally {
+    await client.logout().catch(() => undefined)
+  }
+}
+
 export async function loadInboxThreads({
   host,
   port,
@@ -392,6 +507,7 @@ export async function loadInboxThreads({
   username,
   password,
   folder,
+  folders,
   limit = 100,
 }: LoadInboxThreadsInput): Promise<MailThreadListItem[]> {
   const client = new ImapFlow({
@@ -406,14 +522,17 @@ export async function loadInboxThreads({
 
   try {
     await client.connect()
-    const mailboxLock = await client.getMailboxLock(folder)
+    const messages: ParsedInboxMessage[] = []
+    const targetFolders = uniqueFolders(folders && folders.length > 0 ? folders : [folder])
 
-    try {
+    for (const targetFolder of targetFolders) {
+      const mailboxLock = await client.getMailboxLock(targetFolder)
+
+      try {
       const existingMessages = client.mailbox ? client.mailbox.exists : 0
-      const messages: ParsedInboxMessage[] = []
 
       if (existingMessages === 0) {
-        return []
+        continue
       }
 
       const sequence = `${Math.max(existingMessages - limit + 1, 1)}:*`
@@ -435,7 +554,8 @@ export async function loadInboxThreads({
         const uid = Number(message.uid)
 
         messages.push({
-          id: String(uid),
+          id: `${targetFolder}:${uid}`,
+          folder: targetFolder,
           uid,
           subject,
           from: formatAddressList(message.envelope?.from),
@@ -449,24 +569,27 @@ export async function loadInboxThreads({
           subjectKey: normalizeSubject(subject),
         })
       }
-
-      return groupMessagesIntoThreads(messages)
-        .map((group) => {
-          const latestMessage = group.messages[group.messages.length - 1]
-
-          return {
-            id: encodeThreadId(group.messages.map((message) => message.uid)),
-            subject: latestMessage.subject,
-            from: latestMessage.from,
-            date: latestMessage.date,
-            snippet: latestMessage.snippet,
-            messageCount: group.messages.length,
-          }
-        })
-        .sort((a, b) => (a.date < b.date ? 1 : -1))
-    } finally {
-      mailboxLock.release()
+      } finally {
+        mailboxLock.release()
+      }
     }
+
+    return groupMessagesIntoThreads(messages)
+      .map((group) => {
+        const latestMessage = group.messages[group.messages.length - 1]
+        const foldersInThread = uniqueFolders(group.messages.map((message) => message.folder))
+
+        return {
+          id: encodeThreadId(group.messages.map((message) => ({ folder: message.folder, uid: message.uid }))),
+          subject: latestMessage.subject,
+          from: latestMessage.from,
+          date: latestMessage.date,
+          snippet: latestMessage.snippet,
+          messageCount: group.messages.length,
+          folders: foldersInThread,
+        }
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
   } finally {
     await client.logout().catch(() => undefined)
   }
@@ -497,12 +620,12 @@ export async function loadThreadDetail({
 
   try {
     await client.connect()
-    const mailboxLock = await client.getMailboxLock(folder)
+    const messages: MailThreadMessage[] = []
 
-    try {
-      const messages: MailThreadMessage[] = []
+    for (const { folder: messageFolder, uid } of decodeThreadId(threadId, folder)) {
+      const mailboxLock = await client.getMailboxLock(messageFolder)
 
-      for (const uid of decodeThreadId(threadId)) {
+      try {
         const message = await client.fetchOne(
           uid,
           {
@@ -523,7 +646,7 @@ export async function loadThreadDetail({
         const body = cleanBodyText(html ? htmlToText(html) : text, subject)
 
         messages.push({
-          id: String(message.uid),
+          id: `${messageFolder}:${message.uid}`,
           subject,
           from: formatAddressList(message.envelope?.from),
           to: formatAddressList(message.envelope?.to),
@@ -531,21 +654,21 @@ export async function loadThreadDetail({
           snippet: normalizeSnippet(body, html),
           body,
         })
+      } finally {
+        mailboxLock.release()
       }
+    }
 
-      if (messages.length === 0) {
-        throw new Error('Verlinkte Mail konnte im IMAP-Postfach nicht gefunden werden.')
-      }
+    if (messages.length === 0) {
+      throw new Error('Verlinkte Mail konnte im IMAP-Postfach nicht gefunden werden.')
+    }
 
-      messages.sort((a, b) => (a.date > b.date ? 1 : -1))
-      const root = messages[messages.length - 1]
+    messages.sort((a, b) => (a.date > b.date ? 1 : -1))
+    const root = messages[messages.length - 1]
 
-      return {
-        root,
-        messages,
-      }
-    } finally {
-      mailboxLock.release()
+    return {
+      root,
+      messages,
     }
   } finally {
     await client.logout().catch(() => undefined)

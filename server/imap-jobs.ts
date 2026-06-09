@@ -34,6 +34,7 @@ interface MailboxSecretRecord {
 
 interface LoadThreadsPayload {
   mailboxId: string
+  folders?: string[]
 }
 
 interface CreatePermalinkPayload {
@@ -146,6 +147,7 @@ async function processLoadThreadsJob(job: ImapJobRecord) {
     username: mailbox.username,
     password: decryptSecret(mailbox.encrypted_password, serverEnv.cryptoSecret),
     folder: mailbox.folder,
+    folders: Array.isArray(payload.folders) ? payload.folders : undefined,
   })
 
   return { threads }

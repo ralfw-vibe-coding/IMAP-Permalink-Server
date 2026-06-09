@@ -47,6 +47,14 @@ export interface InboxThreadRecord {
   date: string
   snippet: string
   messageCount?: number
+  folders?: string[]
+}
+
+export interface MailFolderRecord {
+  path: string
+  name: string
+  specialUse: string | null
+  isStandard: boolean
 }
 
 export interface PermalinkRecord {
