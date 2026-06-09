@@ -431,6 +431,66 @@ app.delete('/api/mailboxes/:mailboxId/permalinks/:permalinkId', async (request, 
   }
 })
 
+app.put('/api/mailboxes/:mailboxId/permalinks/:permalinkId', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  const userId = await getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+  }
+
+  const params = request.params as { mailboxId: string; permalinkId: string }
+  const body = request.body as { pin?: string; expiresAt?: string | null } | undefined
+  const pin = body?.pin?.trim() ?? ''
+  const pinAction = body?.pin === undefined || pin === '••••' ? 'keep' : pin ? 'set' : 'clear'
+  const expiresAt = body?.expiresAt?.trim() || null
+
+  if (pinAction === 'set' && !/^\d{4}$/.test(pin)) {
+    return reply.code(400).send({ error: 'PIN muss genau 4 Ziffern haben.' })
+  }
+
+  try {
+    const result = await queryOne<{
+      id: string
+      mailbox_id: string
+      thread_id: string
+      token: string
+      subject: string
+      from_label: string
+      email_date: string
+      snippet: string
+      has_pin: boolean
+      expires_at: string | null
+      created_at: string
+    }>(
+      `update public.permalinks
+       set has_pin = case when $4 = 'set' then true when $4 = 'clear' then false else has_pin end,
+         pin_hash = case when $4 = 'set' then $5 when $4 = 'clear' then null else pin_hash end,
+         expires_at = $6
+       where id = $1 and mailbox_id = $2 and user_id = $3
+       returning id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at`,
+      [
+        params.permalinkId,
+        params.mailboxId,
+        userId,
+        pinAction,
+        pinAction === 'set' ? createHash('sha256').update(pin).digest('hex') : null,
+        expiresAt ? new Date(expiresAt).toISOString() : null,
+      ],
+    )
+
+    if (!result) {
+      return reply.code(404).send({ error: 'Permalink nicht gefunden.' })
+    }
+
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: error instanceof Error ? error.message : 'Permalink konnte nicht gespeichert werden.' })
+  }
+})
+
 app.post('/api/mailboxes/:mailboxId/threads/jobs', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return

@@ -394,6 +394,40 @@ async function handleRequest(request: Request) {
       return json({ data: { success: true } })
     }
 
+    if (parts[3] === 'permalinks' && parts[4] && request.method === 'PUT') {
+      const body = await readJson(request)
+      const pin = String(body.pin ?? '').trim()
+      const pinAction = body.pin === undefined || pin === '••••' ? 'keep' : pin ? 'set' : 'clear'
+      const expiresAt = String(body.expiresAt ?? '').trim() || null
+
+      if (pinAction === 'set' && !/^\d{4}$/.test(pin)) {
+        return json({ error: 'PIN muss genau 4 Ziffern haben.' }, 400)
+      }
+
+      const result = await queryOne(
+        `update public.permalinks
+         set has_pin = case when $4 = 'set' then true when $4 = 'clear' then false else has_pin end,
+           pin_hash = case when $4 = 'set' then $5 when $4 = 'clear' then null else pin_hash end,
+           expires_at = $6
+         where id = $1 and mailbox_id = $2 and user_id = $3
+         returning id, mailbox_id, thread_id, token, subject, from_label, email_date, snippet, has_pin, expires_at, created_at`,
+        [
+          decodeURIComponent(parts[4]),
+          mailboxId,
+          userId,
+          pinAction,
+          pinAction === 'set' ? createHash('sha256').update(pin).digest('hex') : null,
+          expiresAt ? new Date(expiresAt).toISOString() : null,
+        ],
+      )
+
+      if (!result) {
+        return json({ error: 'Permalink nicht gefunden.' }, 404)
+      }
+
+      return json({ data: result })
+    }
+
     if (parts[3] === 'threads' && parts[4] === 'jobs' && request.method === 'POST') {
       const mailbox = await queryOne(
         `select id from public.mailboxes where id = $1 and user_id = $2 limit 1`,

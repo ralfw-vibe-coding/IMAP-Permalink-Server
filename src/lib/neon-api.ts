@@ -214,6 +214,21 @@ export function deletePermalink(mailboxId: string, permalinkId: string, token: s
   })
 }
 
+export function updatePermalink(
+  mailboxId: string,
+  permalinkId: string,
+  input: {
+    pin?: string
+    expiresAt?: string | null
+  },
+  token: string,
+) {
+  return apiFetch<PermalinkRecord>(`/api/mailboxes/${mailboxId}/permalinks/${permalinkId}`, token, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+}
+
 export async function loadPublicPermalink(token: string, pin?: string) {
   const query = pin ? `?pin=${encodeURIComponent(pin)}` : ''
   const response = await fetch(`${apiBaseUrl}/api/permalinks/${token}${query}`)

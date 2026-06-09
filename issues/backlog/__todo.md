@@ -1,3 +1,1 @@
-- Gmail Konto anbinden können
-
-- Deployment nach Netlify testen
+- Gmail Konto anbinden können. Dafür braucht es wohl OAuth2 oder XOAutch, wofür etwas bei Google Console eingerichtet werden muss.
