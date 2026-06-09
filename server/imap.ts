@@ -8,6 +8,17 @@ export interface MailThreadListItem {
   snippet: string
   messageCount: number
   folders: string[]
+  messages: MailThreadListMessage[]
+}
+
+export interface MailThreadListMessage {
+  id: string
+  folder: string
+  subject: string
+  from: string
+  to: string
+  date: string
+  snippet: string
 }
 
 export interface MailFolderListItem {
@@ -587,6 +598,15 @@ export async function loadInboxThreads({
           snippet: latestMessage.snippet,
           messageCount: group.messages.length,
           folders: foldersInThread,
+          messages: group.messages.map((message) => ({
+            id: message.id,
+            folder: message.folder,
+            subject: message.subject,
+            from: message.from,
+            to: message.to,
+            date: message.date,
+            snippet: message.snippet,
+          })),
         }
       })
       .sort((a, b) => (a.date < b.date ? 1 : -1))

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  ChevronDown,
   Copy,
   Pencil,
   ExternalLink,
@@ -118,6 +119,7 @@ export function DashboardPage() {
   const [selectedFolderPaths, setSelectedFolderPaths] = useState<string[]>([])
   const [isLoadingFolders, setIsLoadingFolders] = useState(false)
   const [folderError, setFolderError] = useState<string | null>(null)
+  const [expandedThreadIds, setExpandedThreadIds] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState<'inbox' | 'permalinks'>('inbox')
   const [selectedThread, setSelectedThread] = useState<InboxThreadViewRecord | null>(null)
   const [successToast, setSuccessToast] = useState<string | null>(null)
@@ -849,6 +851,9 @@ export function DashboardPage() {
 	                  {threads.map((thread) => {
 	                    const mailbox = mailboxes.find((entry) => entry.id === thread.mailbox_id)
 	                    const threadColor = mailboxColors.get(thread.mailbox_id) ?? getMailboxColor(0)
+	                    const threadExpansionId = `${thread.mailbox_id}-${thread.id}`
+	                    const isExpanded = expandedThreadIds.includes(threadExpansionId)
+	                    const threadMessages = thread.messages ?? []
 
 	                    return (
 	                    <div
@@ -861,15 +866,36 @@ export function DashboardPage() {
 	                    >
 	                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 	                        <div className="min-w-0 flex-1">
-	                          {thread.folders && thread.folders.length > 0 ? (
-	                            <div className="mb-2 flex flex-wrap justify-start gap-1.5 sm:float-right sm:ml-3 sm:justify-end">
-	                              {thread.folders.map((folder) => (
-	                                <Badge key={folder} className="min-h-6 px-2 py-0.5 text-[11px]" variant="default">
-	                                  {folder}
-	                                </Badge>
-	                              ))}
+	                          <div className="mb-2 flex flex-wrap items-center justify-start gap-1.5 sm:float-right sm:ml-3 sm:justify-end">
+	                            {thread.folders?.map((folder) => (
+	                              <Badge key={folder} className="min-h-6 px-2 py-0.5 text-[11px]" variant="default">
+	                                {folder}
+	                              </Badge>
+	                            ))}
+	                            {threadMessages.length > 1 ? (
+	                              <Button
+	                                aria-label={isExpanded ? 'Thread einklappen' : 'Thread aufklappen'}
+	                                className="size-7 p-0"
+	                                onClick={() => {
+	                                  setExpandedThreadIds((current) =>
+	                                    current.includes(threadExpansionId)
+	                                      ? current.filter((id) => id !== threadExpansionId)
+	                                      : [...current, threadExpansionId],
+	                                  )
+	                                }}
+	                                size="sm"
+	                                type="button"
+	                                variant="outline"
+	                              >
+	                                <ChevronDown
+	                                  className={[
+	                                    'size-3.5 transition-transform',
+	                                    isExpanded ? 'rotate-180' : '',
+	                                  ].join(' ')}
+	                                />
+	                              </Button>
+	                            ) : null}
 	                            </div>
-	                          ) : null}
 	                        <p className="text-xs text-slate-400">
 	                          {mailbox?.label ? `${mailbox.label} · ` : ''}from {thread.from} to {mailbox?.username ?? 'dein Postfach'}
 	                        </p>
@@ -893,6 +919,26 @@ export function DashboardPage() {
 	                        Permalink anlegen
 	                      </Button>
 	                      </div>
+	                      {isExpanded && threadMessages.length > 1 ? (
+	                        <div className="mt-4 space-y-2 border-t border-slate-200 pt-4">
+	                          {threadMessages.map((message) => (
+	                            <div key={message.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
+	                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+	                                <div className="min-w-0">
+	                                  <p className="truncate text-sm font-medium text-slate-950">{message.subject}</p>
+	                                  <p className="mt-1 text-xs text-slate-500">
+	                                    {message.from} · {formatDate(message.date)}
+	                                  </p>
+	                                </div>
+	                                <Badge className="min-h-6 shrink-0 px-2 py-0.5 text-[11px]" variant="default">
+	                                  {message.folder}
+	                                </Badge>
+	                              </div>
+	                              <p className="mt-2 text-sm leading-6 text-slate-600">{message.snippet}</p>
+	                            </div>
+	                          ))}
+	                        </div>
+	                      ) : null}
 	                    </div>
 	                    )
 	                  })}

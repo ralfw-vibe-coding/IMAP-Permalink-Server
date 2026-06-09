@@ -48,6 +48,17 @@ export interface InboxThreadRecord {
   snippet: string
   messageCount?: number
   folders?: string[]
+  messages?: InboxThreadMessageRecord[]
+}
+
+export interface InboxThreadMessageRecord {
+  id: string
+  folder: string
+  subject: string
+  from: string
+  to: string
+  date: string
+  snippet: string
 }
 
 export interface MailFolderRecord {
