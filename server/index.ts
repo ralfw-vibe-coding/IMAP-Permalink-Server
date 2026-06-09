@@ -6,10 +6,18 @@ import { fileURLToPath } from 'node:url'
 import cors from '@fastify/cors'
 import Fastify from 'fastify'
 import type { FastifyReply } from 'fastify'
-import { getAuthenticatedUserId, getBearerToken } from './auth.js'
+import {
+  getAuthenticatedUserId,
+  getBearerToken,
+  getSessionFromToken,
+  requestOtp,
+  revokeSession,
+  verifyOtp,
+} from './auth.js'
 import { decryptSecret, encryptSecret } from './crypto.js'
 import { queryOne, queryRows } from './database.js'
 import { serverEnv } from './env.js'
+import { createImapJob, loadImapJob, startImapJob } from './imap-jobs.js'
 import { loadInboxThreads, loadThreadDetail } from './imap.js'
 
 const app = Fastify({ logger: true })
@@ -40,11 +48,77 @@ async function sendStaticFile(reply: FastifyReply, filePath: string) {
 await app.register(cors, {
   origin: true,
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 })
 
 app.get('/api/health', async () => ({ ok: true }))
+
+app.post('/api/auth/request-otp', async (request, reply) => {
+  const body = request.body as { email?: string; fullName?: string } | undefined
+
+  try {
+    await requestOtp(String(body?.email ?? ''), body?.fullName)
+    return { data: { success: true } }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : 'OTP konnte nicht angefordert werden.',
+    })
+  }
+})
+
+app.post('/api/auth/verify-otp', async (request, reply) => {
+  const body = request.body as { email?: string; otp?: string } | undefined
+
+  try {
+    const session = await verifyOtp(String(body?.email ?? ''), String(body?.otp ?? ''))
+    return { data: session }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(400).send({
+      error: error instanceof Error ? error.message : 'OTP konnte nicht verifiziert werden.',
+    })
+  }
+})
+
+app.get('/api/auth/session', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  try {
+    const user = await getSessionFromToken(token)
+
+    if (!user) {
+      return reply.code(401).send({ error: 'Session ist abgelaufen.' })
+    }
+
+    return {
+      data: {
+        session: {
+          token,
+          expires_at: user.expires_at,
+        },
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+        },
+      },
+    }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({ error: 'Session konnte nicht geladen werden.' })
+  }
+})
+
+app.post('/api/auth/logout', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  await revokeSession(token)
+  return { data: { success: true } }
+})
 
 app.get('/api/permalinks/:token', async (request, reply) => {
   try {
@@ -160,7 +234,7 @@ app.get('/api/profile', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
 
-  const userId = getAuthenticatedUserId(token)
+  const userId = await getAuthenticatedUserId(token)
   if (!userId) {
     return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
@@ -168,11 +242,13 @@ app.get('/api/profile', async (request, reply) => {
   try {
     const result = await queryOne<{
       id: string
+      email: string
       full_name: string
+      last_otp_at: string | null
       created_at: string
       updated_at: string
     }>(
-      'select id, full_name, created_at, updated_at from public.profiles where id = $1 limit 1',
+      'select id, email, full_name, last_otp_at, created_at, updated_at from public.profiles where id = $1 limit 1',
       [userId],
     )
 
@@ -187,7 +263,7 @@ app.put('/api/profile', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
 
-  const userId = getAuthenticatedUserId(token)
+  const userId = await getAuthenticatedUserId(token)
   if (!userId) {
     return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
@@ -202,7 +278,9 @@ app.put('/api/profile', async (request, reply) => {
   try {
     const result = await queryOne<{
       id: string
+      email: string
       full_name: string
+      last_otp_at: string | null
       created_at: string
       updated_at: string
     }>(
@@ -211,7 +289,7 @@ app.put('/api/profile', async (request, reply) => {
        on conflict (id) do update set
          full_name = excluded.full_name,
          updated_at = now()
-       returning id, full_name, created_at, updated_at`,
+       returning id, email, full_name, last_otp_at, created_at, updated_at`,
       [userId, fullName],
     )
 
@@ -225,6 +303,11 @@ app.put('/api/profile', async (request, reply) => {
 app.get('/api/mailboxes', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
+
+  const userId = await getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Session ist abgelaufen.' })
+  }
 
   try {
     const result = await queryRows<{
@@ -244,7 +327,7 @@ app.get('/api/mailboxes', async (request, reply) => {
        from public.mailboxes
        where user_id = $1
        order by created_at desc`,
-      [getAuthenticatedUserId(token)],
+      [userId],
     )
 
     return { data: result }
@@ -258,7 +341,7 @@ app.get('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
 
-  const userId = getAuthenticatedUserId(token)
+  const userId = await getAuthenticatedUserId(token)
   if (!userId) {
     return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
@@ -292,11 +375,38 @@ app.get('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
   }
 })
 
+app.get('/api/imap-jobs/:jobId', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  const userId = await getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+  }
+
+  const params = request.params as { jobId: string }
+
+  try {
+    const job = await loadImapJob(params.jobId, userId)
+
+    if (!job) {
+      return reply.code(404).send({ error: 'IMAP-Job nicht gefunden.' })
+    }
+
+    return { data: job }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'IMAP-Job konnte nicht geladen werden.',
+    })
+  }
+})
+
 app.delete('/api/mailboxes/:mailboxId/permalinks/:permalinkId', async (request, reply) => {
   const token = getBearerToken(request, reply)
   if (!token) return
 
-  const userId = getAuthenticatedUserId(token)
+  const userId = await getAuthenticatedUserId(token)
   if (!userId) {
     return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
   }
@@ -321,12 +431,54 @@ app.delete('/api/mailboxes/:mailboxId/permalinks/:permalinkId', async (request, 
   }
 })
 
+app.post('/api/mailboxes/:mailboxId/threads/jobs', async (request, reply) => {
+  const token = getBearerToken(request, reply)
+  if (!token) return
+
+  const userId = await getAuthenticatedUserId(token)
+  if (!userId) {
+    return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+  }
+
+  const params = request.params as { mailboxId: string }
+
+  try {
+    const mailbox = await queryOne<{ id: string }>(
+      `select id
+       from public.mailboxes
+       where id = $1 and user_id = $2
+       limit 1`,
+      [params.mailboxId, userId],
+    )
+
+    if (!mailbox) {
+      return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
+    }
+
+    const job = await createImapJob({
+      userId,
+      mailboxId: params.mailboxId,
+      type: 'load_threads',
+      payload: { mailboxId: params.mailboxId },
+    })
+
+    startImapJob(job.id)
+
+    return reply.code(202).send({ data: job })
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'Thread-Ladejob konnte nicht gestartet werden.',
+    })
+  }
+})
+
 app.get('/api/mailboxes/:mailboxId/threads', async (request, reply) => {
   try {
     const token = getBearerToken(request, reply)
     if (!token) return
 
-    const userId = getAuthenticatedUserId(token)
+    const userId = await getAuthenticatedUserId(token)
     if (!userId) {
       return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
     }
@@ -375,12 +527,90 @@ app.get('/api/mailboxes/:mailboxId/threads', async (request, reply) => {
   }
 })
 
+app.post('/api/mailboxes/:mailboxId/permalink-jobs', async (request, reply) => {
+  try {
+    const token = getBearerToken(request, reply)
+    if (!token) return
+
+    const userId = await getAuthenticatedUserId(token)
+    if (!userId) {
+      return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+    }
+
+    const params = request.params as { mailboxId: string }
+    const body = request.body as
+      | {
+          threadId?: string
+          subject?: string
+          from?: string
+          date?: string
+          snippet?: string
+          pin?: string
+          expiresAt?: string | null
+        }
+      | undefined
+
+    const threadId = body?.threadId?.trim()
+    const subject = body?.subject?.trim()
+    const from = body?.from?.trim()
+    const date = body?.date?.trim()
+    const snippet = body?.snippet?.trim() ?? ''
+    const pin = body?.pin?.trim() ?? ''
+    const expiresAt = body?.expiresAt?.trim() || null
+
+    if (!threadId || !subject || !from || !date) {
+      return reply.code(400).send({ error: 'Permalink-Daten sind unvollstaendig.' })
+    }
+
+    if (pin && !/^\d{4}$/.test(pin)) {
+      return reply.code(400).send({ error: 'PIN muss genau 4 Ziffern haben.' })
+    }
+
+    const mailbox = await queryOne<{ id: string }>(
+      `select id
+       from public.mailboxes
+       where id = $1 and user_id = $2
+       limit 1`,
+      [params.mailboxId, userId],
+    )
+
+    if (!mailbox) {
+      return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
+    }
+
+    const job = await createImapJob({
+      userId,
+      mailboxId: params.mailboxId,
+      type: 'create_permalink',
+      payload: {
+        mailboxId: params.mailboxId,
+        threadId,
+        subject,
+        from,
+        date,
+        snippet,
+        pin,
+        expiresAt,
+      },
+    })
+
+    startImapJob(job.id)
+
+    return reply.code(202).send({ data: job })
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'Permalink-Job konnte nicht gestartet werden.',
+    })
+  }
+})
+
 app.post('/api/mailboxes', async (request, reply) => {
   try {
     const token = getBearerToken(request, reply)
     if (!token) return
 
-    const userId = getAuthenticatedUserId(token)
+    const userId = await getAuthenticatedUserId(token)
     if (!userId) {
       return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
     }
@@ -437,12 +667,141 @@ app.post('/api/mailboxes', async (request, reply) => {
   }
 })
 
+app.put('/api/mailboxes/:mailboxId', async (request, reply) => {
+  try {
+    const token = getBearerToken(request, reply)
+    if (!token) return
+
+    const userId = await getAuthenticatedUserId(token)
+    if (!userId) {
+      return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+    }
+
+    const params = request.params as { mailboxId: string }
+    const body = request.body as
+      | {
+          label?: string
+          host?: string
+          port?: number
+          username?: string
+          password?: string
+          folder?: string
+          secure?: boolean
+        }
+      | undefined
+
+    const label = body?.label?.trim()
+    const host = body?.host?.trim()
+    const username = body?.username?.trim()
+    const password = body?.password?.trim() ?? ''
+    const folder = body?.folder?.trim() || 'INBOX'
+    const port = Number(body?.port ?? 993)
+    const secure = body?.secure ?? true
+
+    if (!label || !host || !username || Number.isNaN(port)) {
+      return reply.code(400).send({ error: 'Mailbox-Daten sind unvollstaendig.' })
+    }
+
+    const result = await queryOne<{
+      id: string
+      user_id: string
+      label: string
+      host: string
+      port: number
+      secure: boolean
+      username: string
+      folder: string
+      last_verified_at: string | null
+      created_at: string
+      updated_at: string
+    }>(
+      password
+        ? `update public.mailboxes
+           set label = $3,
+             host = $4,
+             port = $5,
+             secure = $6,
+             username = $7,
+             encrypted_password = $8,
+             folder = $9,
+             updated_at = now()
+           where id = $1 and user_id = $2
+           returning id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at`
+        : `update public.mailboxes
+           set label = $3,
+             host = $4,
+             port = $5,
+             secure = $6,
+             username = $7,
+             folder = $8,
+             updated_at = now()
+           where id = $1 and user_id = $2
+           returning id, user_id, label, host, port, secure, username, folder, last_verified_at, created_at, updated_at`,
+      password
+        ? [
+            params.mailboxId,
+            userId,
+            label,
+            host,
+            port,
+            secure,
+            username,
+            encryptSecret(password, serverEnv.cryptoSecret),
+            folder,
+          ]
+        : [params.mailboxId, userId, label, host, port, secure, username, folder],
+    )
+
+    if (!result) {
+      return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
+    }
+
+    return { data: result }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'Mailbox konnte nicht gespeichert werden.',
+    })
+  }
+})
+
+app.delete('/api/mailboxes/:mailboxId', async (request, reply) => {
+  try {
+    const token = getBearerToken(request, reply)
+    if (!token) return
+
+    const userId = await getAuthenticatedUserId(token)
+    if (!userId) {
+      return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
+    }
+
+    const params = request.params as { mailboxId: string }
+    const result = await queryOne<{ id: string }>(
+      `delete from public.mailboxes
+       where id = $1 and user_id = $2
+       returning id`,
+      [params.mailboxId, userId],
+    )
+
+    if (!result) {
+      return reply.code(404).send({ error: 'Mailbox nicht gefunden.' })
+    }
+
+    return { data: { success: true } }
+  } catch (error) {
+    request.log.error(error)
+    return reply.code(500).send({
+      error: error instanceof Error ? error.message : 'Mailbox konnte nicht geloescht werden.',
+    })
+  }
+})
+
 app.post('/api/mailboxes/:mailboxId/permalinks', async (request, reply) => {
   try {
     const token = getBearerToken(request, reply)
     if (!token) return
 
-    const userId = getAuthenticatedUserId(token)
+    const userId = await getAuthenticatedUserId(token)
     if (!userId) {
       return reply.code(401).send({ error: 'Token enthaelt keine Benutzer-ID.' })
     }

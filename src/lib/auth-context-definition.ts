@@ -1,18 +1,12 @@
 import { createContext } from 'react'
-import type { getNeonAuth } from './neon-auth'
-
-type SessionPayload = Awaited<ReturnType<ReturnType<typeof getNeonAuth>['getSession']>>['data']
+import type { AuthSessionRecord } from './types'
 
 export interface AuthContextValue {
   isLoading: boolean
-  session: SessionPayload | null
+  session: AuthSessionRecord | null
   error: string | null
-  login: (params: { email: string; password: string }) => Promise<boolean>
-  signup: (params: {
-    email: string
-    password: string
-    name: string
-  }) => Promise<{ ok: boolean; needsLogin?: boolean }>
+  requestOtp: (params: { email: string; fullName?: string }) => Promise<boolean>
+  verifyOtp: (params: { email: string; otp: string }) => Promise<boolean>
   logout: () => Promise<void>
   refreshSession: () => Promise<void>
   ensureProfile: (fullName?: string | null) => Promise<void>

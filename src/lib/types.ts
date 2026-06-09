@@ -4,9 +4,23 @@ export interface UserProfile {
   fullName: string
 }
 
+export interface AuthSessionRecord {
+  session: {
+    token: string
+    expires_at: string
+  }
+  user: {
+    id: string
+    email: string
+    name: string
+  }
+}
+
 export interface ProfileRecord {
   id: string
+  email: string
   full_name: string
+  last_otp_at: string | null
   created_at: string
   updated_at: string
 }
@@ -46,6 +60,31 @@ export interface PermalinkRecord {
   has_pin: boolean
   expires_at: string | null
   created_at: string
+}
+
+export type ImapJobStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type ImapJobType = 'load_threads' | 'create_permalink'
+
+export interface ImapJobRecord<T = unknown> {
+  id: string
+  user_id: string
+  mailbox_id: string | null
+  type: ImapJobType
+  status: ImapJobStatus
+  payload: unknown
+  result: T | null
+  error: string | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+}
+
+export interface LoadThreadsJobResult {
+  threads: InboxThreadRecord[]
+}
+
+export interface CreatePermalinkJobResult {
+  permalink: PermalinkRecord
 }
 
 export interface PublicPermalinkRecord {

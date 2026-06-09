@@ -1,4 +1,4 @@
-import { LogOut, ShieldCheck } from 'lucide-react'
+import { LogOut, ShieldCheck, User } from 'lucide-react'
 import { Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../lib/use-auth'
 import { Button } from '../ui/button'
@@ -7,7 +7,7 @@ export function AppShell() {
   const navigate = useNavigate()
   const { logout, session } = useAuth()
   const displayName =
-    session?.user?.name || session?.user?.email || session?.user?.id || 'Unbekannter Nutzer'
+    session?.user?.email || session?.user?.name || session?.user?.id || 'Unbekannter Nutzer'
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(242,117,86,0.18),_transparent_24%),linear-gradient(180deg,_#f8f5ef_0%,_#efe7da_100%)] text-slate-900">
@@ -24,9 +24,10 @@ export function AppShell() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm">
-                Nutzer: {displayName}
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <Button className="max-w-full break-all" variant="outline" size="sm">
+                <User className="size-4 shrink-0" />
+                {displayName}
               </Button>
               <Button
                 className="text-slate-200 hover:bg-white/10 hover:text-white"

@@ -320,8 +320,13 @@ export async function loadInboxThreads({
 
     try {
       const existingMessages = client.mailbox ? client.mailbox.exists : 0
-      const sequence = `${Math.max(existingMessages - limit + 1, 1)}:*`
       const messages: MailThreadListItem[] = []
+
+      if (existingMessages === 0) {
+        return messages
+      }
+
+      const sequence = `${Math.max(existingMessages - limit + 1, 1)}:*`
 
       for await (const message of client.fetch(sequence, {
         uid: true,

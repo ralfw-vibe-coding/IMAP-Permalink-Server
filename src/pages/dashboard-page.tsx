@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ChevronRight,
   Copy,
+  Pencil,
   ExternalLink,
   Link as LinkIcon,
   LoaderCircle,
@@ -17,15 +18,29 @@ import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import {
   createMailbox,
+  deleteMailbox,
   deletePermalink,
-  createPermalink,
+  loadImapJob,
   loadMailboxes,
   loadMailboxPermalinks,
-  loadMailboxThreads,
   loadProfile,
+  startCreatePermalinkJob,
+  startLoadMailboxThreadsJob,
+  updateMailbox,
 } from '../lib/neon-api'
-import type { InboxThreadRecord, MailboxRecord, PermalinkRecord } from '../lib/types'
+import type {
+  CreatePermalinkJobResult,
+  ImapJobStatus,
+  InboxThreadRecord,
+  LoadThreadsJobResult,
+  MailboxRecord,
+  PermalinkRecord,
+} from '../lib/types'
 import { useAuth } from '../lib/use-auth'
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString('de-DE', {
@@ -52,14 +67,19 @@ export function DashboardPage() {
   const [isLoadingThreads, setIsLoadingThreads] = useState(false)
   const [isLoadingPermalinks, setIsLoadingPermalinks] = useState(false)
   const [isSavingMailbox, setIsSavingMailbox] = useState(false)
+  const [deletingMailboxId, setDeletingMailboxId] = useState<string | null>(null)
   const [isSavingPermalink, setIsSavingPermalink] = useState(false)
+  const [threadJobStatus, setThreadJobStatus] = useState<ImapJobStatus | null>(null)
+  const [permalinkJobStatus, setPermalinkJobStatus] = useState<ImapJobStatus | null>(null)
   const [deletingPermalinkId, setDeletingPermalinkId] = useState<string | null>(null)
+  const [pendingDeleteMailboxId, setPendingDeleteMailboxId] = useState<string | null>(null)
   const [pendingDeletePermalinkId, setPendingDeletePermalinkId] = useState<string | null>(null)
   const [mailboxError, setMailboxError] = useState<string | null>(null)
   const [permalinkError, setPermalinkError] = useState<string | null>(null)
   const [generalError, setGeneralError] = useState<string | null>(null)
   const [isMailboxOverlayOpen, setIsMailboxOverlayOpen] = useState(false)
   const [isPermalinkOverlayOpen, setIsPermalinkOverlayOpen] = useState(false)
+  const [editingMailbox, setEditingMailbox] = useState<MailboxRecord | null>(null)
   const [activeTab, setActiveTab] = useState<'inbox' | 'permalinks'>('inbox')
   const [selectedThread, setSelectedThread] = useState<InboxThreadRecord | null>(null)
   const [successToast, setSuccessToast] = useState<string | null>(null)
@@ -102,25 +122,61 @@ export function DashboardPage() {
   )
 
   useEffect(() => {
+    let isCancelled = false
+
     const run = async () => {
       if (!selectedMailboxId || !sessionToken) {
         setThreads([])
+        setThreadJobStatus(null)
         return
       }
 
       setIsLoadingThreads(true)
+      setThreadJobStatus('pending')
+      setGeneralError(null)
 
       try {
-        const loadedThreads = await loadMailboxThreads(selectedMailboxId, sessionToken)
-        setThreads(loadedThreads)
+        const startedJob = await startLoadMailboxThreadsJob(selectedMailboxId, sessionToken)
+        let currentJob = startedJob
+
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          if (isCancelled) {
+            return
+          }
+
+          setThreadJobStatus(currentJob.status)
+
+          if (currentJob.status === 'completed') {
+            setThreads(currentJob.result?.threads ?? [])
+            return
+          }
+
+          if (currentJob.status === 'failed') {
+            throw new Error(currentJob.error || 'INBOX konnte nicht geladen werden.')
+          }
+
+          await delay(1500)
+          currentJob = await loadImapJob<LoadThreadsJobResult>(startedJob.id, sessionToken)
+        }
+
+        throw new Error('INBOX-Job laeuft zu lange. Bitte spaeter erneut versuchen.')
       } catch (error) {
-        setGeneralError(error instanceof Error ? error.message : 'INBOX konnte nicht geladen werden.')
+        if (!isCancelled) {
+          setGeneralError(error instanceof Error ? error.message : 'INBOX konnte nicht geladen werden.')
+        }
       } finally {
-        setIsLoadingThreads(false)
+        if (!isCancelled) {
+          setIsLoadingThreads(false)
+          setThreadJobStatus(null)
+        }
       }
     }
 
     void run()
+
+    return () => {
+      isCancelled = true
+    }
   }, [selectedMailboxId, sessionToken])
 
   const copyPermalinkToClipboard = async (token: string) => {
@@ -147,6 +203,47 @@ export function DashboardPage() {
     } finally {
       setDeletingPermalinkId(null)
       setPendingDeletePermalinkId(null)
+    }
+  }
+
+  const handleDeleteMailbox = async (mailboxId: string) => {
+    if (!sessionToken) {
+      setGeneralError('Session-Token fehlt. Bitte erneut einloggen.')
+      return
+    }
+
+    setDeletingMailboxId(mailboxId)
+    setGeneralError(null)
+
+    try {
+      await deleteMailbox(mailboxId, sessionToken)
+      setMailboxes((current) => {
+        const nextMailboxes = current.filter((mailbox) => mailbox.id !== mailboxId)
+
+        setSelectedMailboxId((currentSelectedId) => {
+          if (currentSelectedId !== mailboxId) {
+            return currentSelectedId
+          }
+
+          return nextMailboxes[0]?.id ?? null
+        })
+
+        return nextMailboxes
+      })
+
+      if (selectedMailboxId === mailboxId) {
+        setThreads([])
+        setPermalinks([])
+      }
+
+      setSuccessToast('IMAP-Server geloescht')
+    } catch (error) {
+      setGeneralError(
+        error instanceof Error ? error.message : 'IMAP-Server konnte nicht geloescht werden.',
+      )
+    } finally {
+      setDeletingMailboxId(null)
+      setPendingDeleteMailboxId(null)
     }
   }
 
@@ -177,6 +274,22 @@ export function DashboardPage() {
       document.removeEventListener('pointerdown', handlePointerDown)
     }
   }, [pendingDeletePermalinkId])
+
+  useEffect(() => {
+    if (!pendingDeleteMailboxId) {
+      return
+    }
+
+    const handlePointerDown = () => {
+      setPendingDeleteMailboxId(null)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+    }
+  }, [pendingDeleteMailboxId])
 
   useEffect(() => {
     const run = async () => {
@@ -223,7 +336,14 @@ export function DashboardPage() {
               <CardTitle className="text-xl">IMAP-Server</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Button className="w-full" onClick={() => setIsMailboxOverlayOpen(true)}>
+              <Button
+                className="w-full"
+                onClick={() => {
+                  setEditingMailbox(null)
+                  setMailboxError(null)
+                  setIsMailboxOverlayOpen(true)
+                }}
+              >
                 <Plus className="size-4" />
                 IMAP-Server eintragen
               </Button>
@@ -245,30 +365,87 @@ export function DashboardPage() {
                 const isSelected = mailbox.id === selectedMailboxId
 
                 return (
-                  <button
+                  <div
                     key={mailbox.id}
                     className={[
-                      'w-full rounded-[24px] border px-4 py-4 text-left transition',
+                      'w-full rounded-[24px] border px-4 py-4 transition',
                       isSelected
                         ? 'border-slate-950 bg-slate-950 text-white'
                         : 'border-slate-200 bg-white text-slate-950 hover:border-slate-300 hover:bg-slate-50',
                     ].join(' ')}
-                    onClick={() => setSelectedMailboxId(mailbox.id)}
-                    type="button"
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="font-medium">{mailbox.label}</p>
-                        <p className={isSelected ? 'mt-1 text-sm text-slate-300' : 'mt-1 text-sm text-slate-500'}>
-                          {mailbox.username}
-                        </p>
-                        <p className={isSelected ? 'mt-1 text-xs text-slate-400' : 'mt-1 text-xs text-slate-400'}>
-                          {mailbox.host}:{mailbox.port}
-                        </p>
+                      <button
+                        className="min-w-0 flex-1 text-left"
+                        onClick={() => setSelectedMailboxId(mailbox.id)}
+                        type="button"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">{mailbox.label}</p>
+                            <p className={isSelected ? 'mt-1 truncate text-sm text-slate-300' : 'mt-1 truncate text-sm text-slate-500'}>
+                              {mailbox.username}
+                            </p>
+                            <p className={isSelected ? 'mt-1 truncate text-xs text-slate-400' : 'mt-1 truncate text-xs text-slate-400'}>
+                              {mailbox.host}:{mailbox.port}
+                            </p>
+                          </div>
+                          <ChevronRight className={isSelected ? 'size-4 shrink-0 text-white' : 'size-4 shrink-0 text-slate-400'} />
+                        </div>
+                      </button>
+
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          aria-label="IMAP-Server bearbeiten"
+                          className={isSelected ? 'size-9 border-white/20 bg-white/10 p-0 text-white hover:bg-white/15' : 'size-9 p-0'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setEditingMailbox(mailbox)
+                            setMailboxError(null)
+                            setIsMailboxOverlayOpen(true)
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <Button
+                          aria-label={
+                            pendingDeleteMailboxId === mailbox.id
+                              ? 'Loeschen bestaetigen'
+                              : 'IMAP-Server loeschen'
+                          }
+                          className="size-9 border-rose-200 bg-rose-50 p-0 text-rose-700 hover:border-rose-300 hover:bg-rose-100 hover:text-rose-800"
+                          disabled={deletingMailboxId === mailbox.id}
+                          onPointerDown={(event) => {
+                            event.stopPropagation()
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation()
+
+                            if (pendingDeleteMailboxId === mailbox.id) {
+                              void handleDeleteMailbox(mailbox.id)
+                              return
+                            }
+
+                            setPendingDeleteMailboxId(mailbox.id)
+                          }}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          {deletingMailboxId === mailbox.id ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : pendingDeleteMailboxId === mailbox.id ? (
+                            <span className="text-sm font-semibold leading-none">?</span>
+                          ) : (
+                            <Trash2 className="size-4" />
+                          )}
+                        </Button>
                       </div>
-                      <ChevronRight className={isSelected ? 'size-4 text-white' : 'size-4 text-slate-400'} />
                     </div>
-                  </button>
+                  </div>
                 )
               })}
             </CardContent>
@@ -437,7 +614,9 @@ export function DashboardPage() {
                   {selectedMailbox && isLoadingThreads ? (
                     <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
                       <LoaderCircle className="size-4 animate-spin" />
-                      INBOX wird geladen...
+                      {threadJobStatus === 'processing'
+                        ? 'IMAP-Server wird im Hintergrund abgefragt...'
+                        : 'INBOX-Job wird gestartet...'}
                     </div>
                   ) : null}
 
@@ -487,13 +666,22 @@ export function DashboardPage() {
           <Card className="w-full max-w-xl border-white/80 bg-white shadow-[0_40px_120px_-50px_rgba(15,23,42,0.7)]">
             <CardHeader className="flex flex-row items-start justify-between gap-4">
               <div>
-                <CardTitle>Neuen IMAP-Server eintragen</CardTitle>
-                <CardDescription>Nur die wirklich noetigen Angaben, der Rest bleibt schlank.</CardDescription>
+                <CardTitle>
+                  {editingMailbox ? 'IMAP-Server bearbeiten' : 'Neuen IMAP-Server eintragen'}
+                </CardTitle>
+                <CardDescription>
+                  {editingMailbox
+                    ? 'Passwort leer lassen, wenn es unveraendert bleiben soll.'
+                    : 'Nur die wirklich noetigen Angaben, der Rest bleibt schlank.'}
+                </CardDescription>
               </div>
               <Button
                 aria-label="Overlay schliessen"
                 className="size-9 p-0"
-                onClick={() => setIsMailboxOverlayOpen(false)}
+                onClick={() => {
+                  setIsMailboxOverlayOpen(false)
+                  setEditingMailbox(null)
+                }}
                 size="sm"
                 variant="ghost"
               >
@@ -502,6 +690,7 @@ export function DashboardPage() {
             </CardHeader>
             <CardContent>
               <form
+                key={editingMailbox?.id ?? 'new-mailbox'}
                 className="grid gap-4"
                 onSubmit={async (event) => {
                   event.preventDefault()
@@ -517,22 +706,43 @@ export function DashboardPage() {
                   const formData = new FormData(event.currentTarget)
 
                   try {
-                    const createdMailbox = await createMailbox(
-                      {
-                        label: String(formData.get('label') ?? ''),
-                        host: String(formData.get('host') ?? ''),
-                        port: Number(formData.get('port') ?? 993),
-                        username: String(formData.get('username') ?? ''),
-                        password: String(formData.get('imapPassword') ?? ''),
-                        folder: String(formData.get('folder') ?? 'INBOX'),
-                        secure: true,
-                      },
-                      sessionToken,
-                    )
+                    const input = {
+                      label: String(formData.get('label') ?? ''),
+                      host: String(formData.get('host') ?? ''),
+                      port: Number(formData.get('port') ?? 993),
+                      username: String(formData.get('username') ?? ''),
+                      password: String(formData.get('imapPassword') ?? '').trim(),
+                      folder: String(formData.get('folder') ?? 'INBOX'),
+                      secure: true,
+                    }
 
-                    setMailboxes((current) => [createdMailbox, ...current])
-                    setSelectedMailboxId(createdMailbox.id)
+                    if (editingMailbox) {
+                      const updatedMailbox = await updateMailbox(
+                        editingMailbox.id,
+                        {
+                          ...input,
+                          password: input.password || undefined,
+                        },
+                        sessionToken,
+                      )
+
+                      setMailboxes((current) =>
+                        current.map((mailbox) =>
+                          mailbox.id === updatedMailbox.id ? updatedMailbox : mailbox,
+                        ),
+                      )
+                      setSelectedMailboxId(updatedMailbox.id)
+                      setSuccessToast('IMAP-Server gespeichert')
+                    } else {
+                      const createdMailbox = await createMailbox(input, sessionToken)
+
+                      setMailboxes((current) => [createdMailbox, ...current])
+                      setSelectedMailboxId(createdMailbox.id)
+                      setSuccessToast('IMAP-Server gespeichert')
+                    }
+
                     setIsMailboxOverlayOpen(false)
+                    setEditingMailbox(null)
                     event.currentTarget.reset()
                   } catch (error) {
                     setMailboxError(
@@ -546,33 +756,57 @@ export function DashboardPage() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="mailbox-label">Bezeichnung</Label>
-                    <Input id="mailbox-label" name="label" placeholder="ralfw.de" />
+                    <Input
+                      id="mailbox-label"
+                      name="label"
+                      defaultValue={editingMailbox?.label ?? ''}
+                      placeholder="ralfw.de"
+                    />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="mailbox-folder">Ordner</Label>
-                    <Input id="mailbox-folder" defaultValue="INBOX" name="folder" />
+                    <Input
+                      id="mailbox-folder"
+                      defaultValue={editingMailbox?.folder ?? 'INBOX'}
+                      name="folder"
+                    />
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   <Label htmlFor="mailbox-host">IMAP Host</Label>
-                  <Input id="mailbox-host" name="host" placeholder="mail.example.com" />
+                  <Input
+                    id="mailbox-host"
+                    name="host"
+                    defaultValue={editingMailbox?.host ?? ''}
+                    placeholder="mail.example.com"
+                  />
                 </div>
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="mailbox-port">Port</Label>
-                    <Input id="mailbox-port" defaultValue="993" name="port" />
+                    <Input id="mailbox-port" defaultValue={editingMailbox?.port ?? 993} name="port" />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="mailbox-username">Benutzername</Label>
-                    <Input id="mailbox-username" name="username" placeholder="info@example.com" />
+                    <Input
+                      id="mailbox-username"
+                      name="username"
+                      defaultValue={editingMailbox?.username ?? ''}
+                      placeholder="info@example.com"
+                    />
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   <Label htmlFor="mailbox-password">IMAP Passwort</Label>
-                  <Input id="mailbox-password" name="imapPassword" type="password" />
+                  <Input
+                    id="mailbox-password"
+                    name="imapPassword"
+                    placeholder={editingMailbox ? 'Unveraendert lassen' : ''}
+                    type="password"
+                  />
                 </div>
 
                 {mailboxError ? (
@@ -582,12 +816,19 @@ export function DashboardPage() {
                 ) : null}
 
                 <div className="flex justify-end gap-3 pt-2">
-                  <Button onClick={() => setIsMailboxOverlayOpen(false)} type="button" variant="ghost">
+                  <Button
+                    onClick={() => {
+                      setIsMailboxOverlayOpen(false)
+                      setEditingMailbox(null)
+                    }}
+                    type="button"
+                    variant="ghost"
+                  >
                     Abbrechen
                   </Button>
                   <Button disabled={isSavingMailbox} type="submit">
                     {isSavingMailbox ? <LoaderCircle className="size-4 animate-spin" /> : <Server className="size-4" />}
-                    Speichern
+                    {editingMailbox ? 'Aenderungen speichern' : 'Speichern'}
                   </Button>
                 </div>
               </form>
@@ -632,10 +873,11 @@ export function DashboardPage() {
                   const expiresAt = String(formData.get('expiresAt') ?? '').trim()
 
                   setIsSavingPermalink(true)
+                  setPermalinkJobStatus('pending')
                   setPermalinkError(null)
 
                   try {
-                    const createdPermalink = await createPermalink(
+                    const startedJob = await startCreatePermalinkJob(
                       selectedMailboxId,
                       {
                         threadId: selectedThread.id,
@@ -648,19 +890,43 @@ export function DashboardPage() {
                       },
                       sessionToken,
                     )
+                    let currentJob = startedJob
 
-                    setPermalinks((current) => [createdPermalink, ...current])
-                    await copyPermalinkToClipboard(createdPermalink.token)
-                    setSuccessToast('Permalink kopiert')
-                    setIsPermalinkOverlayOpen(false)
-                    setSelectedThread(null)
-                    event.currentTarget.reset()
+                    for (let attempt = 0; attempt < 120; attempt += 1) {
+                      setPermalinkJobStatus(currentJob.status)
+
+                      if (currentJob.status === 'completed') {
+                        const createdPermalink = currentJob.result?.permalink
+
+                        if (!createdPermalink) {
+                          throw new Error('Permalink-Job wurde ohne Ergebnis abgeschlossen.')
+                        }
+
+                        setPermalinks((current) => [createdPermalink, ...current])
+                        await copyPermalinkToClipboard(createdPermalink.token)
+                        setSuccessToast('Permalink kopiert')
+                        setIsPermalinkOverlayOpen(false)
+                        setSelectedThread(null)
+                        event.currentTarget.reset()
+                        return
+                      }
+
+                      if (currentJob.status === 'failed') {
+                        throw new Error(currentJob.error || 'Permalink konnte nicht erstellt werden.')
+                      }
+
+                      await delay(1500)
+                      currentJob = await loadImapJob<CreatePermalinkJobResult>(startedJob.id, sessionToken)
+                    }
+
+                    throw new Error('Permalink-Job laeuft zu lange. Bitte spaeter erneut versuchen.')
                   } catch (error) {
                     setPermalinkError(
                       error instanceof Error ? error.message : 'Permalink konnte nicht erstellt werden.',
                     )
                   } finally {
                     setIsSavingPermalink(false)
+                    setPermalinkJobStatus(null)
                   }
                 }}
               >
@@ -689,13 +955,22 @@ export function DashboardPage() {
                   </div>
                 ) : null}
 
+                {isSavingPermalink ? (
+                  <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                    <LoaderCircle className="size-4 animate-spin" />
+                    {permalinkJobStatus === 'processing'
+                      ? 'Mail wird im Hintergrund aus IMAP gelesen und als Snapshot gespeichert...'
+                      : 'Permalink-Job wird gestartet...'}
+                  </div>
+                ) : null}
+
                 <div className="flex justify-end gap-3">
                   <Button onClick={() => setIsPermalinkOverlayOpen(false)} type="button" variant="ghost">
                     Abbrechen
                   </Button>
                   <Button disabled={isSavingPermalink} type="submit">
                     {isSavingPermalink ? <LoaderCircle className="size-4 animate-spin" /> : <LinkIcon className="size-4" />}
-                    Permalink erstellen
+                    {isSavingPermalink ? 'Snapshot wird erstellt' : 'Permalink erstellen'}
                   </Button>
                 </div>
               </form>

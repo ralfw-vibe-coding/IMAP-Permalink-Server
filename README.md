@@ -1,10 +1,10 @@
 # IMAP Permalink Server
 
-Node.js application with React, TypeScript, Neon Auth, Neon Postgres and live IMAP access.
+Node.js application with React, TypeScript, OTP auth, Neon Postgres and live IMAP access.
 
 Users can:
 
-- sign up and log in
+- log in with an email OTP
 - register IMAP mailboxes
 - browse inbox threads
 - create public permalinks for emails
@@ -17,7 +17,7 @@ Permalinks store a snapshot of the mail body when they are created. Public perma
 
 - Frontend: React + Vite + TypeScript
 - Backend: Node.js + Fastify
-- Auth: Neon Auth
+- Auth: custom email OTP with Resend
 - Database: Neon Postgres
 - Mail access: IMAP via `imapflow`
 
@@ -26,29 +26,28 @@ Permalinks store a snapshot of the mail body when they are created. Public perma
 Use a local `.env` like this:
 
 ```env
-VITE_NEON_AUTH_URL=https://your-branch.neonauth.<region>.aws.neon.tech/neondb/auth
 DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 APP_CRYPTO_SECRET=replace-with-a-long-random-secret
+AUTH_SESSION_SECRET=replace-with-another-long-random-secret
+AUTH_SECRET_OTP=optional-alphanumeric-master-code
+RESEND_API_KEY=re_your_api_key
+AUTH_FROM_EMAIL=Mail Thread Vault <login@example.com>
 ```
 
 Notes:
 
-- `VITE_NEON_AUTH_URL` is used by the frontend for Neon Auth.
 - `DATABASE_URL` is used by the Node.js server for direct Postgres access.
 - `APP_CRYPTO_SECRET` is used to encrypt stored IMAP passwords.
+- `AUTH_SESSION_SECRET` is used to HMAC-hash OTPs and session tokens before storing them.
+- `AUTH_SECRET_OTP` is an optional alphanumeric master OTP that is always accepted.
+- `RESEND_API_KEY` is used to send login OTP emails.
+- `AUTH_FROM_EMAIL` is the verified Resend sender address.
 
 ## What To Get From Neon
 
 From Neon you need:
 
-1. `Auth URL`
-This is the Neon Auth project URL and goes into:
-
-```env
-VITE_NEON_AUTH_URL=...
-```
-
-2. `Postgres connection string`
+1. `Postgres connection string`
 Use the normal connection string from Neon and put it into:
 
 ```env
@@ -67,9 +66,13 @@ The SQL file is current.
 
 It creates and updates:
 
+- `public.auth_users`
+- `public.auth_otps`
+- `public.auth_sessions`
 - `public.profiles`
 - `public.mailboxes`
 - `public.permalinks`
+- `public.imap_jobs`
 
 The important columns for permalink snapshots are:
 
@@ -78,30 +81,17 @@ The important columns for permalink snapshots are:
 - `snippet`
 - `body`
 
-## Neon Auth configuration
+## Auth flow
 
-In Neon Auth, add your app origin as a trusted domain.
+Login uses a passwordless OTP flow. There is no separate signup; the first successful login creates the user profile:
 
-Important:
+1. the user enters an email address
+2. the server stores a hashed 6-digit OTP that expires after 10 minutes
+3. the server sends the OTP through Resend
+4. after successful verification, the server creates an opaque bearer token
+5. the token is valid for 4 weeks and is stored hashed in `public.auth_sessions`
 
-- enter the exact origin
-- do not add a trailing slash
-
-Correct:
-
-```text
-https://your-app.onrender.com
-```
-
-Incorrect:
-
-```text
-https://your-app.onrender.com/
-```
-
-If the trailing slash is present, Neon Auth login can fail with `403 Forbidden`.
-
-For local development, keep localhost enabled as well.
+If `AUTH_SECRET_OTP` is set, that alphanumeric code is accepted as a permanent OTP for any email address. Keep it secret and rotate it like an admin credential.
 
 ## Local development
 
@@ -152,9 +142,12 @@ Recommended settings:
 Environment variables on Render:
 
 ```env
-VITE_NEON_AUTH_URL=...
 DATABASE_URL=...
 APP_CRYPTO_SECRET=...
+AUTH_SESSION_SECRET=...
+AUTH_SECRET_OTP=...
+RESEND_API_KEY=...
+AUTH_FROM_EMAIL=...
 ```
 
 Why `--ignore-scripts`:
@@ -174,3 +167,11 @@ After deployment, test these flows on the live URL:
 - opening a permalink without login
 - opening a PIN-protected permalink
 - opening a permalink after deleting or moving the original email
+
+## Netlify direction
+
+The frontend can be deployed to Netlify from `dist/`; `netlify.toml` contains the basic Vite SPA configuration.
+
+IMAP access is modeled as asynchronous jobs because mailbox access can be slow. The UI starts an IMAP job, polls `/api/imap-jobs/:jobId`, and updates itself when the job is completed or failed. The database table `public.imap_jobs` stores the job status, payload, result and error message.
+
+The shared job runner lives in `server/imap-jobs.ts`. Locally, Fastify starts the runner in-process after creating a job. For a full Netlify backend migration, API functions should create the job and invoke `netlify/functions/process-imap-job-background.ts`, so long-running IMAP work runs in a Netlify Background Function instead of a synchronous request.
