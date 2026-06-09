@@ -1,4 +1,4 @@
-import { runImapJob } from '../../server/imap-jobs'
+import { runImapJob } from '../../server/imap-jobs.js'
 
 export default async (request: Request) => {
   if (request.method !== 'POST') {

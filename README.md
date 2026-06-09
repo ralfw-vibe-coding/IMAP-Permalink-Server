@@ -108,7 +108,9 @@ npm run dev
 ```
 
 Frontend runs on `http://localhost:5173`.
-The backend runs locally and the frontend talks to it via relative `/api/...` requests.
+The backend runs locally on `http://localhost:8787` and Vite proxies relative `/api/...` requests to it. Do not set `VITE_API_BASE_URL` for local development.
+
+Local development does not use Netlify Functions. Run `npm run dev` to start both the Vite frontend and the local Fastify backend.
 
 ## Production build
 
@@ -170,8 +172,10 @@ After deployment, test these flows on the live URL:
 
 ## Netlify direction
 
-The frontend can be deployed to Netlify from `dist/`; `netlify.toml` contains the basic Vite SPA configuration.
+The frontend and backend can be deployed to Netlify. `netlify.toml` contains the Vite SPA and Functions configuration. API routes under `/api/*` are handled by `netlify/functions/api.ts`.
+
+For Netlify deployment, keep `VITE_API_BASE_URL` unset so the browser calls `/api/...` on the same Netlify site. Neon remains the database in every environment.
 
 IMAP access is modeled as asynchronous jobs because mailbox access can be slow. The UI starts an IMAP job, polls `/api/imap-jobs/:jobId`, and updates itself when the job is completed or failed. The database table `public.imap_jobs` stores the job status, payload, result and error message.
 
-The shared job runner lives in `server/imap-jobs.ts`. Locally, Fastify starts the runner in-process after creating a job. For a full Netlify backend migration, API functions should create the job and invoke `netlify/functions/process-imap-job-background.ts`, so long-running IMAP work runs in a Netlify Background Function instead of a synchronous request.
+The shared job runner lives in `server/imap-jobs.ts`. Locally, Fastify starts the runner in-process after creating a job. On Netlify, `netlify/functions/api.ts` creates jobs and invokes `netlify/functions/process-imap-job-background.ts`, so long-running IMAP work runs in a Netlify Background Function instead of a synchronous request.

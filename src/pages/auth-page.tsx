@@ -65,10 +65,7 @@ export function AuthPage() {
 
       if (success) {
         navigate('/app')
-        return
       }
-
-      setLocalError('Der Code ist nicht korrekt oder abgelaufen.')
     } finally {
       setIsVerifyingCode(false)
     }
